@@ -1,0 +1,96 @@
+# Pre-registered defaults, message byte sizes, and hypotheses from proposal/proposal.tex
+experiment: prereg
+description: >
+  Pre-registered specification for "Finding New Passages in Distributed Vector Search"
+  (CCGRID 2027 Track 4). Committed prior to running any main experiments.
+
+dataset:
+  corpus_dataset_id: "BeIR/msmarco"
+  corpus_revision: "a918e0d11a77ed33f42f29d98340b655593b96ad"
+  qrels_dataset_id: "BeIR/msmarco-qrels"
+  qrels_revision: "253fbf8a3f8d4a0932b63882b5162bedc84779f5"
+  embedding_model_id: "sentence-transformers/all-MiniLM-L6-v2"
+  embedding_model_revision: "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+  dim: 384
+  initial_passages: 50000
+  stream_passages: 50000
+  test_queries: 1000
+  sample_queries: 64
+  data_seed: 42
+
+byte_accounting:
+  vector_bytes: 1536
+  summary_centers: 16
+  summary_bytes: 24576
+  result_item_bytes: 12
+  result_list_bytes: 120
+  shard_search_bytes: 1656
+  cutoffs_per_shard_bytes: 512
+  shard_score_bytes: 4
+  sample_reply_per_query_shard_bytes: 40
+  setup_sample_vectors_per_shard_bytes: 98304
+  recovered_neighbor_overhead_at_S32_m2_bytes: 21632
+
+defaults:
+  num_shards: 32
+  c: 16
+  m: 2
+  num_epochs: 50
+  inserts_per_epoch: 1000
+  queries_per_epoch: 200
+  recent_window_w: 2
+  budget_summaries: 4
+  budget_bytes: 98304
+  sharding_mode: kmeans
+  stream_mode: steady
+  bursts: false
+  hnsw:
+    space: ip
+    M: 16
+    ef_construction: 200
+    ef_search: 100
+  seeds: [42, 43, 44, 45, 46]
+
+sweeps:
+  num_shards: [16, 32, 64]
+  m: [2, 4]
+  budget_summaries: [2, 4, 8, 16]
+  budget_bytes: [49152, 98304, 196608, 393216]
+  queries_per_epoch: [50, 100, 200, 400]
+  stream_modes: [steady, cluster_order, query_shift]
+
+methods:
+  refresh_rules:
+    - round_robin
+    - data_change
+    - recovered_neighbor
+    - ql
+    - ss
+  equal_bytes_alternatives:
+    - extra_search
+    - push_vectors
+  bounds:
+    - always_fresh
+    - all_shards
+
+hypotheses:
+  H1_recovered_neighbor_vs_refresh_rules:
+    metric: recent_recall_at_10
+    window_w: 2
+    min_point_gain: 0.05
+    ci_level: 0.95
+    bootstrap_resamples: 2000
+    criterion: >
+      Recovered-neighbor refresh succeeds if, at the default setting, its recent recall@10
+      beats every other refresh rule by at least 5 percentage points (0.05) at equal bytes,
+      with the 95% paired bootstrap confidence interval of the gap strictly above zero.
+  H2_refresh_vs_extra_search_and_push_vectors:
+    criterion: >
+      Determine the break-even query rate Q per epoch where refreshing summaries finds more
+      recent top-10 neighbors than spending equal bytes B on extra shard searches (1,656 bytes each)
+      or pushing new vectors to the coordinator (1,536 bytes each).
+  H3_drift_regime_sensitivity:
+    criterion: >
+      Test whether summary refresh provides larger gains under cluster-order arrivals (Big-ANN
+      streaming runbook style) than under stationary steady arrivals, and measure sensitivity to
+      query shift away from the 64 sample queries.

@@ -1,0 +1,50 @@
+{
+  "corpus_dataset_id": "BeIR/msmarco",
+  "corpus_revision": "a918e0d11a77ed33f42f29d98340b655593b96ad",
+  "qrels_dataset_id": "BeIR/msmarco-qrels",
+  "qrels_revision": "253fbf8a3f8d4a0932b63882b5162bedc84779f5",
+  "embedding_model_id": "sentence-transformers/all-MiniLM-L6-v2",
+  "embedding_model_revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+  "seed": 42,
+  "query_sampling_seeds": {
+    "passages": 42,
+    "test_queries": 43,
+    "sample_queries": 44
+  },
+  "counts": {
+    "total_corpus_rows": 8841823,
+    "sampled_passages": 100000,
+    "initial_passages": 50000,
+    "stream_passages": 50000,
+    "dev_queries_available": 6980,
+    "train_queries_available": 502939,
+    "test_queries": 1000,
+    "sample_queries": 64,
+    "embedding_dim": 384
+  },
+  "leakage_checks": {
+    "id_overlap_count": 0,
+    "text_overlap_count": 0,
+    "max_sample_test_cosine": 0.8116310834884644
+  },
+  "source_file_sha256": {
+    "corpus/corpus-00000-of-00001.parquet": "57d6fc19851d4a363fff8b3e9acb0b549d97d4b141bd2aedd1522149dfeb8bd6",
+    "queries/queries-00000-of-00001.parquet": "9f43da825b7788be9303603cc48ae21705da7a75e4a69e6121af56e25b34cdd6",
+    "dev.tsv": "ec0a7d2ee847ce9196c5eae9471a3caff2206395cd5c145dade2e242a02cf0f7",
+    "train.tsv": "d0d3e416da19aaec7880ddb426ce98a387fa24282221c6fad1f6de61eb3650e0"
+  },
+  "output_file_sha256": {
+    "initial_vectors.npy": "730bce546fbbe507ecdc714b0eaab008550204a09d6826f9b2206a42a32d54a4",
+    "initial_ids.npy": "5e6f18fa35313c7df96bd82f3f8767b7d7e7d35228b732b2b001f6428761aede",
+    "stream_vectors.npy": "fa72e65c7a7a477c31d1d7c6f6b61eb8745a0777a52b05a0ee9c9c3d61de64e2",
+    "stream_ids.npy": "e233a0947873760c1485c120fceb361e9c938b1db6c7ddaeb1087fe275d7564f",
+    "test_queries.npy": "4167192b46b59e9155f99e88f8c9495d08c7e197983581a02e15f5ad98273182",
+    "test_query_ids.npy": "cbf9989a52f2e8e58bbb3d30cfde0ce244e89df0fa264260ca87913a3cfaf160",
+    "sample_queries.npy": "9954370e89f2089ab7a485910dd34e845d8eb31c7ce8096294f2263fde508137",
+    "sample_query_ids.npy": "666ea7559181b1e1a539aa981076cd0440e9b7ec7f76e4803520f1bfddbce4e9",
+    "initial_ids.json": "f8da3fd5f4729377a12428ac24bb142ea403a9702fe482b534d044659007a626",
+    "stream_ids.json": "16e4bd972f6bf2dc9adc8a316de32123d129ab5c1726a71b2a8c97692796c760",
+    "test_query_ids.json": "f0b6294d75205d1bd6ddf54b573f84ea8cca2cf2b7a382c0f6a345fc3845196b",
+    "sample_query_ids.json": "384243932401e4f55e80156ee83e77d8d087ff9fcf67905be30079116271a07f"
+  }
+}
