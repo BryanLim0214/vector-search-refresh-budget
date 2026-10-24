@@ -1,9 +1,15 @@
-# Pre-Registration Addendum 2 (committed before any M2 result exists and before any M1-online or M3 run)
+# Pre-Registration Addendum 2 (committed on 24 Oct 2026 at 12:47, after M2 runs had started and about 140 of 330 M2 runs had finished, before anyone opened, read or analysed any M2 output, and before any M1-online or M3 run)
 experiment: prereg_addendum2
 description: >
   Pre-registration addendum 2 for "Finding New Passages in Distributed Vector Search",
-  committed after code review (audit/GUARDIAN_C1_technical.md) and prior to any M2 result
-  existing or any M1-online / M3 run starting.
+  committed after code review (audit/GUARDIAN_C1_technical.md, written at 12:02 on 24 Oct 2026, before M2 started at about 12:22). When this file was committed at 12:47, about 140 of the 330 M2 runs had finished, but nobody had opened, read or analysed any M2 output. No M1-online or M3 run had started.
+correction_note: >
+  Correction (24 Oct 2026): When commit 3c17673 was made on 24 Oct 2026 at 12:47, 140 of 330 M2
+  runs had finished, but none had been read or analysed, and no M1-online or M3 run had started;
+  the flaw was found by code review before any M2 run started. In addition, the analysis code of
+  commit c0e300f had been run by a guardian on 117 partial M1 runs (audit/GUARDIAN_C_analyze.md,
+  reporting one M1 value: data_change, steady, Q = 50: 0.72264), and that analysis code was
+  byte-identical and unchanged since.
 
 why_this_addendum:
   1_time_segment_structural_ties: >
@@ -60,9 +66,20 @@ hypotheses_and_decision_rules:
     condition: "Q = 200, B in {2, 4, 8}, streams in {steady, new_topic}"
     metric: "max_{query, seed, B, rule} |recent_recall_at_10(rule) - recent_recall_at_10(always_fresh)|"
     decision_rule: >
-      Stated before M2 runs: on M2, all five refresh rules (round_robin, data_change,
+      Stated before anyone read or analysed any M2 output (M2 was already running and about 140 of 330 runs had finished; the prediction follows from the code argument in GUARDIAN_C1_technical.md H-1, written before M2 started): on M2, all five refresh rules (round_robin, data_change,
       recovered_neighbor, ql, ss) equal always_fresh in recent recall@10 per query (max absolute
       difference == 0.0 on each stream). Report the maximum absolute per-query difference per stream.
+  PRED_M3_B8_TIES:
+    experiment: M3
+    placement_mode: time_segment_g
+    active_segments: 8
+    condition: "Q = 200, B = 8, streams in {steady, new_topic}"
+    decision_rule: >
+      Stated before any M3 run: at B = 8, round_robin, data_change, ql and ss (k = 8 = G) equal
+      always_fresh in recent recall@10 per query (max absolute difference == 0.0 on each stream);
+      recovered_neighbor (k = 7) is not predicted to tie. Report the maximum absolute per-query
+      difference per stream and rule. H4b at B = 8 is read as fresh summaries against the
+      alternatives, not as a refresh rule against the alternatives.
   GATE_M3:
     experiment: M3
     placement_mode: time_segment_g
@@ -92,7 +109,11 @@ hypotheses_and_decision_rules:
       among round_robin, data_change, recovered_neighbor, ql, ss on M1) at equal bytes at Q = 200, B = 4
       (mean gap > 0 with 95% paired bootstrap interval above zero), per stream. Also report the
       break-even Q between the fixed Q = 200 best refresh rule and extra_search_online across
-      Q in {50, 200, 800}.
+      Q in {50, 200, 800}. At Q = 50, B = 4 the budget allows 59 extra searches but there are only
+      50 queries per epoch: extra_search spends all 59 (9 of them on the (m+2)-th shard), while
+      extra_search_online gives at most one extra search per query and leaves at least 14,904 B per
+      epoch unspent. The Q = 50 gap therefore mixes look-ahead with the second extra shard and
+      unequal bytes; mean budget bytes spent are reported next to it.
   H4b:
     experiment: M3
     placement_mode: time_segment_g
@@ -110,7 +131,11 @@ hypotheses_and_decision_rules:
     decision_rule: >
       Report the batch look-ahead gap (extra_search minus extra_search_online) on M1 (across Q in
       {50, 200, 800} at B = 4) and on M3 (across B in {2, 4, 8} at Q = 200) per stream with 95% paired
-      bootstrap intervals.
+      bootstrap intervals. At Q = 50, B = 4 the budget allows 59 extra searches but there are only
+      50 queries per epoch: extra_search spends all 59 (9 of them on the (m+2)-th shard), while
+      extra_search_online gives at most one extra search per query and leaves at least 14,904 B per
+      epoch unspent. The Q = 50 gap therefore mixes look-ahead with the second extra shard and
+      unequal bytes; mean budget bytes spent are reported next to it.
 
 addendum2_experiments:
   seeds: [42, 43, 44, 45, 46]

@@ -147,6 +147,8 @@ def _write_synthetic_run(
     policy: str,
     seed: int,
     override_recent_mean: Optional[float] = None,
+    seed_sign_noise: float = 0.0,
+    single_query_offset: float = 0.0,
 ) -> None:
     """Create a complete synthetic run folder with small numpy arrays (n_queries=40, n_epochs=6)."""
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -161,10 +163,15 @@ def _write_synthetic_run(
     )
     # Small deterministic seed-level offset so across-seed variance is non-zero but tight
     seed_offset = (seed - 44) * 0.001
+    if seed_sign_noise != 0.0:
+        sign_map = {42: 1.0, 43: 1.0, 44: -1.0, 45: -1.0, 46: 0.0}
+        seed_offset += sign_map.get(int(seed), 0.0) * float(seed_sign_noise)
     q_idx = np.arange(n_with_recent, dtype=np.float64)
     q_jitter = ((q_idx % 5) - 2.0) * 0.002
 
     recent_valid = np.clip(target_rec + seed_offset + q_jitter, 0.0, 1.0).astype(np.float32)
+    if single_query_offset != 0.0:
+        recent_valid[0] = np.float32(np.clip(float(recent_valid[0]) + float(single_query_offset), 0.0, 1.0))
     q_recent = np.empty(n_queries, dtype=np.float32)
     # Shared NaN mask across policies for the same (stream, Q, seed): last 8 queries have no recent neighbors
     q_recent[:n_with_recent] = recent_valid
@@ -206,7 +213,16 @@ def _write_synthetic_run(
     cap_mode = str(grid_spec["starvation_cap_mode"])
     cap_epochs = int(grid_spec["fixed_cap_epochs"]) if grid_spec["fixed_cap_epochs"] is not None else 16
     budget_bytes = int(b_sum) * 24576
-    spent_bytes = 0 if policy in ("never_refresh", "oracle_routing", "all_shards") else budget_bytes * 50
+    if policy in ("never_refresh", "oracle_routing", "all_shards"):
+        spent_bytes = 0
+    elif policy == "extra_search":
+        n_e = budget_bytes // 1656
+        spent_bytes = n_e * 1656 * 50
+    elif policy == "extra_search_online":
+        n_e = min(int(q_val), budget_bytes // 1656)
+        spent_bytes = n_e * 1656 * 50
+    else:
+        spent_bytes = budget_bytes * 50
 
     cfg_dict: Dict[str, Any] = {
         "policy": policy,
@@ -617,8 +633,11 @@ def test_addendum2_hypotheses_pred_m2_ties_and_lookahead(
         == "no crossing in {50, 200, 800}: extra_search_online ahead at all Q (rule: data_change, picked at Q = 200)"
     )
 
-    # 3. LOOKAHEAD intervals on M1+M1_online (+1.00 pp) and M3 (+1.50 pp)
+    # 3. LOOKAHEAD intervals on M1+M1_online (+1.00 pp) and M3 (+1.50 pp), plus bytes printed next to each Q/B
     assert df_hyp.loc["LOOKAHEAD", "outcome"] == "steady=REPORTED, new_topic=REPORTED"
+    assert "M1(B=4,Q=50):" in str(df_hyp.loc["LOOKAHEAD", "steady_value"])
+    assert "bytes: ES=4,885,200, ESO=4,140,000" in str(df_hyp.loc["LOOKAHEAD", "steady_value"])
+    assert "Q=50[data_change=4,915,200, ESO=4,140,000, PV=4,915,200]" in str(df_hyp.loc["H2b", "steady_value"])
     df_la = res["df_lookahead"]
     assert len(df_la) == 12  # 2 streams * (3 Q in M1 + 3 B in M3)
     m1_la = df_la[df_la["experiment"] == "M1+M1_online"]
@@ -626,14 +645,19 @@ def test_addendum2_hypotheses_pred_m2_ties_and_lookahead(
     assert np.allclose(m1_la["recent_diff_mean"].to_numpy(dtype=np.float64), 0.010, atol=1e-4)
     assert np.allclose(m3_la["recent_diff_mean"].to_numpy(dtype=np.float64), 0.015, atol=1e-4)
 
-    # 4. PRED_M2_TIES: on default synth_results_root where M2 refresh rules differ from always_fresh (0.650),
-    # PRED_M2_TIES is FAIL; when all 5 refresh rules match always_fresh (0.650) per query, PRED_M2_TIES is PASS (0.00 pp).
+    # 4. PRED_M2_TIES and PRED_M3_B8_TIES: on default synth_results_root where refresh rules differ from always_fresh (0.650),
+    # both are FAIL; when M2 refresh rules match always_fresh (0.650) per query and M3 B=8 4 rules (rr, dc, ql, ss) match
+    # always_fresh (0.650) per query (while recovered_neighbor at k=7 stays 0.740), both are PASS (0.00 pp) on steady.
     assert df_hyp.loc["PRED_M2_TIES", "outcome"] == "steady=FAIL, new_topic=FAIL"
+    assert df_hyp.loc["PRED_M3_B8_TIES", "outcome"] == "steady=FAIL, new_topic=FAIL"
     assert res["pred_m2_ties"]["steady"]["max_abs_diff"] > 0.10
+    assert res["pred_m3_b8_ties"]["steady"]["max_abs_diff"] > 0.01
 
     configs_dir = REPO_ROOT / "configs"
     grid_m2 = load_expected_grid(configs_dir / "main_M2.yaml", "M2")
+    grid_m3 = load_expected_grid(configs_dir / "main_M3.yaml", "M3")
     m2_dir = synth_results_root / "main" / "M2"
+    m3_dir = synth_results_root / "main" / "M3"
     modified_dirs: Dict[Path, Path] = {}
     try:
         for (stream, _placement, b_sum, q_val, _cap_mode, pol, seed), rid in grid_m2[
@@ -641,7 +665,7 @@ def test_addendum2_hypotheses_pred_m2_ties_and_lookahead(
         ].items():
             if pol in REFRESH_RULES and stream == "steady":
                 orig_dir = m2_dir / rid
-                bak_dir = tmp_path / f"bak_tie_{rid}"
+                bak_dir = tmp_path / f"t_{len(modified_dirs)}"
                 shutil.move(str(orig_dir), str(bak_dir))
                 modified_dirs[orig_dir] = bak_dir
                 _write_synthetic_run(
@@ -657,12 +681,38 @@ def test_addendum2_hypotheses_pred_m2_ties_and_lookahead(
                     override_recent_mean=0.650,
                 )
 
+        for (stream, _placement, b_sum, q_val, _cap_mode, pol, seed), rid in grid_m3[
+            "expected_cells"
+        ].items():
+            if pol in ("round_robin", "data_change", "ql", "ss") and stream == "steady" and b_sum == 8:
+                orig_dir = m3_dir / rid
+                bak_dir = tmp_path / f"t_{len(modified_dirs)}"
+                shutil.move(str(orig_dir), str(bak_dir))
+                modified_dirs[orig_dir] = bak_dir
+                _write_synthetic_run(
+                    run_dir=orig_dir,
+                    run_id=rid,
+                    exp_label="M3",
+                    grid_spec=grid_m3,
+                    stream_mode=stream,
+                    b_sum=b_sum,
+                    q_val=q_val,
+                    policy=pol,
+                    seed=seed,
+                    override_recent_mean=0.650,
+                )
+
         out_ties = tmp_path / "out_ties"
         res_ties = analyze_all(results_root=synth_results_root, out_dir=out_ties)
         df_hyp_ties = res_ties["df_hyp"].set_index("hypothesis")
         assert df_hyp_ties.loc["PRED_M2_TIES", "outcome"] == "steady=PASS, new_topic=FAIL"
         assert res_ties["pred_m2_ties"]["steady"]["max_abs_diff"] == 0.0
         assert "0.00 pp (0.000000" in str(df_hyp_ties.loc["PRED_M2_TIES", "steady_value"])
+
+        assert df_hyp_ties.loc["PRED_M3_B8_TIES", "outcome"] == "steady=PASS, new_topic=FAIL"
+        assert res_ties["pred_m3_b8_ties"]["steady"]["max_abs_diff"] == 0.0
+        assert "0.00 pp (0.000000" in str(df_hyp_ties.loc["PRED_M3_B8_TIES", "steady_value"])
+        assert "recovered_neighbor(k=7):9.00 pp" in str(df_hyp_ties.loc["PRED_M3_B8_TIES", "steady_value"])
     finally:
         for orig_dir, bak_dir in modified_dirs.items():
             if orig_dir.exists():
@@ -762,4 +812,534 @@ def test_missing_m1_online_or_m3_run_marks_addendum2_tests_incomplete(
     finally:
         shutil.move(str(bak_m1_on), str(m1_on_dir))
         shutil.move(str(bak_m3), str(m3_dir))
+
+
+def test_decision_rule_boundaries_ci_crossing_and_tie_tolerance(
+    synth_results_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Boundary tests (N-1 / M-2) for H1, GATE_M2, H3, H2, H4, GATE_M3, H3b, H2b, H4b,
+    PRED_M2_TIES, and PRED_M3_B8_TIES:
+    - 4.9 pp (0.049) vs 5.1 pp (0.051) gaps around the 5.0 pp threshold
+    - Positive mean gap whose across-seed 95% bootstrap interval crosses zero (while within-seed CI > 0)
+    - 1-query tie violation of 0.001 (0.1 pp) vs exact 0.0 tie
+    """
+    configs_dir = REPO_ROOT / "configs"
+    grid_m1 = load_expected_grid(configs_dir / "main_M1.yaml", "M1")
+    grid_m1_on = load_expected_grid(configs_dir / "main_M1_online.yaml", "M1_online")
+    grid_m2 = load_expected_grid(configs_dir / "main_M2.yaml", "M2")
+    grid_m3 = load_expected_grid(configs_dir / "main_M3.yaml", "M3")
+
+    m1_dir = synth_results_root / "main" / "M1"
+    m1_on_dir = synth_results_root / "main" / "M1_online"
+    m2_dir = synth_results_root / "main" / "M2"
+    m3_dir = synth_results_root / "main" / "M3"
+
+    # --- Pass 1:
+    # H1: steady = +0.051 (FAIL), new_topic = +0.049 (PASS)
+    # GATE_M2: steady = +0.049 (FAIL), new_topic = +0.051 (PASS)
+    # H3 on new_topic (where GATE_M2 passed at 5.1 pp): RN - data_change = +0.049 (FAIL)
+    # GATE_M3: steady = +0.049 (FAIL), new_topic = +0.051 (PASS)
+    # H3b on new_topic (where GATE_M3 passed at 5.1 pp): RN - data_change = +0.049 (FAIL)
+    # PRED_M2_TIES: steady has 1 query differing by 0.001 (FAIL); new_topic has exact 0.0 tie (PASS)
+    # PRED_M3_B8_TIES: steady has 1 query differing by 0.001 (FAIL); new_topic has exact 0.0 tie (PASS)
+    modified_p1: Dict[Path, Path] = {}
+
+    def _override_run(
+        bak_dict: Dict[Path, Path],
+        tag: str,
+        exp_dir: Path,
+        exp_label: str,
+        grid_spec: Dict[str, Any],
+        rid: str,
+        stream: str,
+        b_sum: int,
+        q_val: int,
+        pol: str,
+        seed: int,
+        mean_val: float,
+        seed_noise: float = 0.0,
+        q0_offset: float = 0.0,
+    ) -> None:
+        orig_dir = exp_dir / rid
+        if orig_dir not in bak_dict:
+            bak_dir = tmp_path / f"{tag}_{len(bak_dict)}"
+            shutil.move(str(orig_dir), str(bak_dir))
+            bak_dict[orig_dir] = bak_dir
+        elif orig_dir.exists():
+            shutil.rmtree(orig_dir)
+        _write_synthetic_run(
+            run_dir=orig_dir,
+            run_id=rid,
+            exp_label=exp_label,
+            grid_spec=grid_spec,
+            stream_mode=stream,
+            b_sum=b_sum,
+            q_val=q_val,
+            policy=pol,
+            seed=seed,
+            override_recent_mean=mean_val,
+            seed_sign_noise=seed_noise,
+            single_query_offset=q0_offset,
+        )
+
+    try:
+        for seed in grid_m1["seeds"]:
+            # H1: never_refresh is 0.500; set always_fresh to 0.551 on steady (FAIL) and 0.549 on new_topic (PASS)
+            _override_run(
+                modified_p1,
+                "p1",
+                m1_dir,
+                "M1",
+                grid_m1,
+                grid_m1["expected_cells"][("steady", "nearest_initial", 4, 200, "arithmetic", "always_fresh", seed)],
+                "steady",
+                4,
+                200,
+                "always_fresh",
+                seed,
+                0.551,
+            )
+            _override_run(
+                modified_p1,
+                "p1",
+                m1_dir,
+                "M1",
+                grid_m1,
+                grid_m1["expected_cells"][("new_topic", "nearest_initial", 4, 200, "arithmetic", "always_fresh", seed)],
+                "new_topic",
+                4,
+                200,
+                "always_fresh",
+                seed,
+                0.549,
+            )
+
+        # M2: set all 5 refresh rules to tie always_fresh (on steady AF=0.549 at B=4, 0.650 at B=2,8;
+        # on new_topic AF=0.551 at B=4, 0.650 at B=2,8) except B=4 new_topic where we also test H3=0.049
+        # Wait: PRED_M2_TIES checks B in {2, 4, 8}. Let's test PRED_M2_TIES 0.001 violation on steady (where GATE_M2=0.049 FAIL so H3 is NOT TESTED anyway!)
+        for b_sum in (2, 4, 8):
+            af_steady_val = 0.549 if b_sum == 4 else 0.650
+            for seed in grid_m2["seeds"]:
+                if b_sum == 4:
+                    _override_run(
+                        modified_p1,
+                        "p1",
+                        m2_dir,
+                        "M2",
+                        grid_m2,
+                        grid_m2["expected_cells"][("steady", "time_segment", 4, 200, "arithmetic", "always_fresh", seed)],
+                        "steady",
+                        4,
+                        200,
+                        "always_fresh",
+                        seed,
+                        af_steady_val,
+                    )
+                for pol in REFRESH_RULES:
+                    q0_off = 0.001 if (b_sum == 4 and pol == "round_robin" and seed == 42) else 0.0
+                    _override_run(
+                        modified_p1,
+                        "p1",
+                        m2_dir,
+                        "M2",
+                        grid_m2,
+                        grid_m2["expected_cells"][("steady", "time_segment", b_sum, 200, "arithmetic", pol, seed)],
+                        "steady",
+                        b_sum,
+                        200,
+                        pol,
+                        seed,
+                        af_steady_val,
+                        q0_offset=q0_off,
+                    )
+
+        # On M2 new_topic at B=4: always_fresh = 0.551 (GATE_M2 = +0.051 PASS),
+        # recovered_neighbor = 0.680, data_change = 0.631 (RN - DC = +0.049 -> H3 FAIL)
+        for seed in grid_m2["seeds"]:
+            _override_run(
+                modified_p1,
+                "p1",
+                m2_dir,
+                "M2",
+                grid_m2,
+                grid_m2["expected_cells"][("new_topic", "time_segment", 4, 200, "arithmetic", "always_fresh", seed)],
+                "new_topic",
+                4,
+                200,
+                "always_fresh",
+                seed,
+                0.551,
+            )
+            _override_run(
+                modified_p1,
+                "p1",
+                m2_dir,
+                "M2",
+                grid_m2,
+                grid_m2["expected_cells"][("new_topic", "time_segment", 4, 200, "arithmetic", "data_change", seed)],
+                "new_topic",
+                4,
+                200,
+                "data_change",
+                seed,
+                0.631,
+            )
+
+        # On M3:
+        # GATE_M3: steady always_fresh = 0.549 (+0.049 -> FAIL), new_topic always_fresh = 0.551 (+0.051 -> PASS)
+        # H3b on new_topic: RN = 0.680, data_change = 0.631 (+0.049 -> FAIL)
+        # PRED_M3_B8_TIES at B=8: on steady, 4 rules match AF (0.650) except 1 query with +0.001 (FAIL);
+        # on new_topic, 4 rules match AF (0.650) exactly (PASS) while RN stays 0.740.
+        for seed in grid_m3["seeds"]:
+            _override_run(
+                modified_p1,
+                "p1",
+                m3_dir,
+                "M3",
+                grid_m3,
+                grid_m3["expected_cells"][("steady", "time_segment_g", 4, 200, "arithmetic", "always_fresh", seed)],
+                "steady",
+                4,
+                200,
+                "always_fresh",
+                seed,
+                0.549,
+            )
+            _override_run(
+                modified_p1,
+                "p1",
+                m3_dir,
+                "M3",
+                grid_m3,
+                grid_m3["expected_cells"][("new_topic", "time_segment_g", 4, 200, "arithmetic", "always_fresh", seed)],
+                "new_topic",
+                4,
+                200,
+                "always_fresh",
+                seed,
+                0.551,
+            )
+            _override_run(
+                modified_p1,
+                "p1",
+                m3_dir,
+                "M3",
+                grid_m3,
+                grid_m3["expected_cells"][("new_topic", "time_segment_g", 4, 200, "arithmetic", "data_change", seed)],
+                "new_topic",
+                4,
+                200,
+                "data_change",
+                seed,
+                0.631,
+            )
+            for pol in ("round_robin", "data_change", "ql", "ss"):
+                q0_off = 0.001 if (pol == "round_robin" and seed == 42) else 0.0
+                _override_run(
+                    modified_p1,
+                    "p1",
+                    m3_dir,
+                    "M3",
+                    grid_m3,
+                    grid_m3["expected_cells"][("steady", "time_segment_g", 8, 200, "arithmetic", pol, seed)],
+                    "steady",
+                    8,
+                    200,
+                    pol,
+                    seed,
+                    0.650,
+                    q0_offset=q0_off,
+                )
+                _override_run(
+                    modified_p1,
+                    "p1",
+                    m3_dir,
+                    "M3",
+                    grid_m3,
+                    grid_m3["expected_cells"][("new_topic", "time_segment_g", 8, 200, "arithmetic", pol, seed)],
+                    "new_topic",
+                    8,
+                    200,
+                    pol,
+                    seed,
+                    0.650,
+                )
+
+        res_p1 = analyze_all(results_root=synth_results_root, out_dir=tmp_path / "out_bound_p1")
+        df_hyp_p1 = res_p1["df_hyp"].set_index("hypothesis")
+        assert df_hyp_p1.loc["H1", "outcome"] == "FAIL (steady=FAIL, new_topic=PASS)"
+        assert df_hyp_p1.loc["GATE_M2", "outcome"] == "steady=FAIL, new_topic=PASS"
+        assert df_hyp_p1.loc["H3", "outcome"] == "steady=NOT TESTED (GATE FAILED) / FAIL, new_topic=FAIL"
+        assert df_hyp_p1.loc["GATE_M3", "outcome"] == "steady=FAIL, new_topic=PASS"
+        assert df_hyp_p1.loc["H3b", "outcome"] == "steady=NOT TESTED (GATE FAILED) / FAIL, new_topic=FAIL"
+        assert df_hyp_p1.loc["PRED_M2_TIES", "outcome"] == "steady=FAIL, new_topic=FAIL"
+        assert np.isclose(res_p1["pred_m2_ties"]["steady"]["max_abs_diff"], 0.001, atol=1e-6)
+        assert df_hyp_p1.loc["PRED_M3_B8_TIES", "outcome"] == "steady=FAIL, new_topic=PASS"
+        assert np.isclose(res_p1["pred_m3_b8_ties"]["steady"]["max_abs_diff"], 0.001, atol=1e-6)
+        assert res_p1["pred_m3_b8_ties"]["new_topic"]["max_abs_diff"] == 0.0
+    finally:
+        for orig_dir, bak_dir in modified_p1.items():
+            if orig_dir.exists():
+                shutil.rmtree(orig_dir)
+            shutil.move(str(bak_dir), str(orig_dir))
+
+    # --- Pass 2:
+    # GATE_M2 & GATE_M3 on steady = +0.051 (PASS)
+    # H3 & H3b on steady: RN (0.680) - data_change (0.629) = +0.051 (PASS)
+    # H3 & H3b on new_topic: RN (0.680) - data_change (0.620 with seed_sign_noise=0.12) -> mean +0.060 >= 0.05,
+    #   within-seed CI low > 0, but across-seed 95% CI low < 0 -> FAIL!
+    # H2 & H2b on steady (Q=200, B=4): ES / ESO has mean 0.555 (> 0.540 data_change) with seed_sign_noise=0.05
+    #   -> mean gap +0.015 > 0, within-seed CI low > 0, across-seed 95% CI low < 0 -> FAIL!
+    # H4 & H4b on steady at B=4: ES / ESO has mean 0.665 (< 0.680 RN) with seed_sign_noise=0.05
+    #   -> RN - ES / ESO mean gap +0.015 > 0, within-seed CI low > 0, across-seed 95% CI low < 0 -> FAIL!
+    modified_p2: Dict[Path, Path] = {}
+    try:
+        for seed in grid_m1["seeds"]:
+            _override_run(
+                modified_p2,
+                "p2",
+                m1_dir,
+                "M1",
+                grid_m1,
+                grid_m1["expected_cells"][("steady", "nearest_initial", 4, 200, "arithmetic", "extra_search", seed)],
+                "steady",
+                4,
+                200,
+                "extra_search",
+                seed,
+                0.555,
+                seed_noise=0.05,
+            )
+            _override_run(
+                modified_p2,
+                "p2",
+                m1_on_dir,
+                "M1_online",
+                grid_m1_on,
+                grid_m1_on["expected_cells"][
+                    ("steady", "nearest_initial", 4, 200, "arithmetic", "extra_search_online", seed)
+                ],
+                "steady",
+                4,
+                200,
+                "extra_search_online",
+                seed,
+                0.555,
+                seed_noise=0.05,
+            )
+
+        for seed in grid_m2["seeds"]:
+            _override_run(
+                modified_p2,
+                "p2",
+                m2_dir,
+                "M2",
+                grid_m2,
+                grid_m2["expected_cells"][("steady", "time_segment", 4, 200, "arithmetic", "always_fresh", seed)],
+                "steady",
+                4,
+                200,
+                "always_fresh",
+                seed,
+                0.551,
+            )
+            _override_run(
+                modified_p2,
+                "p2",
+                m2_dir,
+                "M2",
+                grid_m2,
+                grid_m2["expected_cells"][("steady", "time_segment", 4, 200, "arithmetic", "data_change", seed)],
+                "steady",
+                4,
+                200,
+                "data_change",
+                seed,
+                0.629,
+            )
+            _override_run(
+                modified_p2,
+                "p2",
+                m2_dir,
+                "M2",
+                grid_m2,
+                grid_m2["expected_cells"][("new_topic", "time_segment", 4, 200, "arithmetic", "data_change", seed)],
+                "new_topic",
+                4,
+                200,
+                "data_change",
+                seed,
+                0.620,
+                seed_noise=0.12,
+            )
+            _override_run(
+                modified_p2,
+                "p2",
+                m2_dir,
+                "M2",
+                grid_m2,
+                grid_m2["expected_cells"][("steady", "time_segment", 4, 200, "arithmetic", "extra_search", seed)],
+                "steady",
+                4,
+                200,
+                "extra_search",
+                seed,
+                0.665,
+                seed_noise=0.05,
+            )
+
+        for seed in grid_m3["seeds"]:
+            _override_run(
+                modified_p2,
+                "p2",
+                m3_dir,
+                "M3",
+                grid_m3,
+                grid_m3["expected_cells"][("steady", "time_segment_g", 4, 200, "arithmetic", "always_fresh", seed)],
+                "steady",
+                4,
+                200,
+                "always_fresh",
+                seed,
+                0.551,
+            )
+            _override_run(
+                modified_p2,
+                "p2",
+                m3_dir,
+                "M3",
+                grid_m3,
+                grid_m3["expected_cells"][("steady", "time_segment_g", 4, 200, "arithmetic", "data_change", seed)],
+                "steady",
+                4,
+                200,
+                "data_change",
+                seed,
+                0.629,
+            )
+            _override_run(
+                modified_p2,
+                "p2",
+                m3_dir,
+                "M3",
+                grid_m3,
+                grid_m3["expected_cells"][("new_topic", "time_segment_g", 4, 200, "arithmetic", "data_change", seed)],
+                "new_topic",
+                4,
+                200,
+                "data_change",
+                seed,
+                0.620,
+                seed_noise=0.12,
+            )
+            _override_run(
+                modified_p2,
+                "p2",
+                m3_dir,
+                "M3",
+                grid_m3,
+                grid_m3["expected_cells"][
+                    ("steady", "time_segment_g", 4, 200, "arithmetic", "extra_search_online", seed)
+                ],
+                "steady",
+                4,
+                200,
+                "extra_search_online",
+                seed,
+                0.665,
+                seed_noise=0.05,
+            )
+
+        res_p2 = analyze_all(results_root=synth_results_root, out_dir=tmp_path / "out_bound_p2")
+        df_hyp_p2 = res_p2["df_hyp"].set_index("hypothesis")
+        assert df_hyp_p2.loc["GATE_M2", "outcome"] == "steady=PASS, new_topic=PASS"
+        assert df_hyp_p2.loc["H3", "outcome"] == "steady=PASS, new_topic=FAIL"
+        assert df_hyp_p2.loc["GATE_M3", "outcome"] == "steady=PASS, new_topic=PASS"
+        assert df_hyp_p2.loc["H3b", "outcome"] == "steady=PASS, new_topic=FAIL"
+        assert df_hyp_p2.loc["H2", "outcome"] == "steady=FAIL, new_topic=PASS"
+        assert df_hyp_p2.loc["H2b", "outcome"] == "steady=FAIL, new_topic=PASS"
+        assert "B=4:FAIL (winner: no clear winner" in str(df_hyp_p2.loc["H4", "outcome"]).split(";")[0]
+        assert "B=4:FAIL (winner: no clear winner" in str(df_hyp_p2.loc["H4b", "outcome"]).split(";")[0]
+
+        # Verify that for H3b new_topic (RN vs data_change), the mean is > 0.05 and within-seed CI > 0,
+        # while the across-seed 95% CI low is < 0
+        df_p = res_p2["df_paired"]
+        h3b_nt_dc = df_p[
+            (df_p["comparison_type"] == "H3b_rn_vs_refresh_rules_B4")
+            & (df_p["stream_mode"] == "new_topic")
+            & (df_p["policy_b"] == "data_change")
+        ].iloc[0]
+        assert float(h3b_nt_dc["recent_diff_mean"]) >= 0.05
+        assert float(h3b_nt_dc["recent_diff_within_ci95_low"]) > 0.0
+        assert float(h3b_nt_dc["recent_diff_ci95_low"]) < 0.0
+    finally:
+        for orig_dir, bak_dir in modified_p2.items():
+            if orig_dir.exists():
+                shutil.rmtree(orig_dir)
+            shutil.move(str(bak_dir), str(orig_dir))
+
+
+def test_link_results_combined_analysis_root(
+    synth_results_root: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Verify scripts/link_results.py builds a combined analysis root from two separate result roots
+    and that analyze.py accepts that combined root."""
+    from analysis.analyze import _resolve_experiment_dirs, scan_experiment_runs
+    from scripts.link_results import _remove_existing_destination, build_combined_analysis_root
+
+    short_base = tmp_path_factory.mktemp("lr")
+    repo_side = short_base / "r1"
+    prereg2_side = short_base / "r2"
+    (repo_side / "main").mkdir(parents=True)
+    (prereg2_side / "main").mkdir(parents=True)
+
+    # Link M1, M2, sens into repo_side and M1_online, M3 into prereg2_side
+    build_combined_analysis_root(
+        repo_results_root=synth_results_root,
+        prereg2_results_root=synth_results_root,
+        analysis_root=repo_side,
+        mode="junction",
+    )
+    build_combined_analysis_root(
+        repo_results_root=synth_results_root,
+        prereg2_results_root=synth_results_root,
+        analysis_root=prereg2_side,
+        mode="junction",
+    )
+    # Remove M1_online/M3 from repo_side and M1/M2/sens from prereg2_side so neither root is complete alone
+    for exp in ("M1_online", "M3"):
+        _remove_existing_destination(repo_side / "main" / exp)
+    for exp in ("M1", "M2", "sens"):
+        _remove_existing_destination(prereg2_side / "main" / exp)
+
+    combined_root = short_base / "comb"
+    configs_dir = REPO_ROOT / "configs"
+    try:
+        linked = build_combined_analysis_root(
+            repo_results_root=repo_side,
+            prereg2_results_root=prereg2_side,
+            analysis_root=combined_root,
+            mode="junction",
+        )
+        assert set(linked.keys()) == {"M1", "M2", "sens", "M1_online", "M3"}
+        _, m1_d, m2_d, sens_d, m1_on_d, m3_d = _resolve_experiment_dirs(combined_root)
+        for exp_lbl, yaml_name, exp_d, expected_n in [
+            ("M1", "main_M1.yaml", m1_d, 330),
+            ("M2", "main_M2.yaml", m2_d, 330),
+            ("sens", "main_sens.yaml", sens_d, 66),
+            ("M1_online", "main_M1_online.yaml", m1_on_d, 30),
+            ("M3", "main_M3.yaml", m3_d, 360),
+        ]:
+            grid = load_expected_grid(configs_dir / yaml_name, exp_lbl)
+            scan = scan_experiment_runs(exp_d, grid)
+            assert len(scan["valid_runs"]) == expected_n
+            assert len(scan["issues"]) == 0
+    finally:
+        for root_dir in (combined_root, repo_side, prereg2_side):
+            main_d = root_dir / "main"
+            if main_d.exists():
+                for child in list(main_d.iterdir()):
+                    _remove_existing_destination(child)
 

@@ -1250,23 +1250,46 @@ def _parse_failed_runs_file(
     }
 
 
-def _resolve_experiment_dirs(results_root: Path) -> Tuple[Path, Path, Path, Path]:
-    """Resolve `base_dir`, `m1_dir`, `m2_dir`, `sens_dir` from `results_root`."""
+def _resolve_single_exp_dir(root: Path, exp_name: str) -> Path:
+    """Resolve `<root>/main/<exp_name>` or `<root>/<exp_name>`."""
+    cand_main = root / "main" / exp_name
+    cand_direct = root / exp_name
+    if cand_main.exists():
+        return cand_main.resolve()
+    if cand_direct.exists():
+        return cand_direct.resolve()
+    if (root / "main").exists():
+        return cand_main
+    return cand_direct if root.name == "main" else cand_main
+
+
+def _resolve_experiment_dirs(
+    results_root: Path,
+    prereg2_results_root: Optional[Path] = None,
+) -> Tuple[Path, Path, Path, Path, Path, Path]:
+    """Resolve `base_dir`, `m1_dir`, `m2_dir`, `sens_dir`, `m1_online_dir`, `m3_dir`."""
     if (results_root / "M1").exists() and not (results_root / "main" / "M1").exists():
         base_dir = results_root
     else:
         base_dir = results_root / "main"
-    return base_dir, base_dir / "M1", base_dir / "M2", base_dir / "sens"
+    m1_dir = _resolve_single_exp_dir(results_root, "M1")
+    m2_dir = _resolve_single_exp_dir(results_root, "M2")
+    sens_dir = _resolve_single_exp_dir(results_root, "sens")
+    add2_root = prereg2_results_root if prereg2_results_root is not None else results_root
+    m1_online_dir = _resolve_single_exp_dir(add2_root, "M1_online")
+    m3_dir = _resolve_single_exp_dir(add2_root, "M3")
+    return base_dir, m1_dir, m2_dir, sens_dir, m1_online_dir, m3_dir
 
 
 def analyze_all(
     results_root: Path,
     out_dir: Optional[Path] = None,
     configs_dir: Optional[Path] = None,
+    prereg2_results_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    base_dir, m1_dir, m2_dir, sens_dir = _resolve_experiment_dirs(results_root)
-    m1_online_dir = base_dir / "M1_online"
-    m3_dir = base_dir / "M3"
+    base_dir, m1_dir, m2_dir, sens_dir, m1_online_dir, m3_dir = _resolve_experiment_dirs(
+        results_root, prereg2_results_root=prereg2_results_root
+    )
     if out_dir is None:
         out_dir = base_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1463,6 +1486,9 @@ def analyze_all(
                     "best_refresh_recent_recall": float("nan"),
                     "extra_search_recent_recall": float("nan"),
                     "push_vectors_recent_recall": float("nan"),
+                    "best_refresh_budget_bytes_mean": float("nan"),
+                    "extra_search_budget_bytes_mean": float("nan"),
+                    "push_vectors_budget_bytes_mean": float("nan"),
                     "refresh_minus_extra_search_mean": float("nan"),
                     "refresh_minus_extra_search_ci95_low": float("nan"),
                     "refresh_minus_extra_search_ci95_high": float("nan"),
@@ -1562,6 +1588,9 @@ def analyze_all(
                         "best_refresh_recent_recall": float("nan"),
                         "extra_search_recent_recall": float("nan"),
                         "push_vectors_recent_recall": float("nan"),
+                        "best_refresh_budget_bytes_mean": float("nan"),
+                        "extra_search_budget_bytes_mean": float("nan"),
+                        "push_vectors_budget_bytes_mean": float("nan"),
                         "refresh_minus_extra_search_mean": float("nan"),
                         "refresh_minus_extra_search_ci95_low": float("nan"),
                         "refresh_minus_extra_search_ci95_high": float("nan"),
@@ -1627,6 +1656,9 @@ def analyze_all(
                     "best_refresh_recent_recall": ref_rec,
                     "extra_search_recent_recall": es_rec,
                     "push_vectors_recent_recall": pv_rec,
+                    "best_refresh_budget_bytes_mean": ref_vs_es["budget_bytes_a_mean"],
+                    "extra_search_budget_bytes_mean": ref_vs_es["budget_bytes_b_mean"],
+                    "push_vectors_budget_bytes_mean": ref_vs_pv["budget_bytes_b_mean"],
                     "refresh_minus_extra_search_mean": ref_vs_es["recent_diff_mean"],
                     "refresh_minus_extra_search_ci95_low": ref_vs_es["recent_diff_ci95_low"],
                     "refresh_minus_extra_search_ci95_high": ref_vs_es["recent_diff_ci95_high"],
@@ -2161,6 +2193,107 @@ def analyze_all(
         }
     )
 
+    # --- PRED_M3_B8_TIES (M3, time_segment_g, G=8, Q=200, B=8):
+    # At B=8, round_robin, data_change, ql, ss (k=8=G) equal always_fresh in recent recall@10 per query;
+    # recovered_neighbor (k=7) is not predicted to tie. Report max abs per-query diff per stream and rule. ---
+    m3_b8_tie_rules = ("round_robin", "data_change", "ql", "ss")
+    pred_m3_b8_ties_outcomes: Dict[str, Dict[str, Any]] = {}
+    pred_m3_b8_ties_disp: Dict[str, str] = {}
+    for stream in ("steady", "new_topic"):
+        b8_ok, b8_miss = check_condition_complete(
+            scan_m3,
+            stream,
+            "time_segment_g",
+            8,
+            200,
+            "arithmetic",
+            ["always_fresh"] + REFRESH_RULES,
+        )
+        if not b8_ok:
+            inc_str = format_incomplete_status(b8_miss)
+            pred_m3_b8_ties_outcomes[stream] = {
+                "complete": False,
+                "status": inc_str,
+                "max_abs_diff": float("nan"),
+                "max_abs_diff_by_policy": {},
+                "pass": False,
+            }
+            pred_m3_b8_ties_disp[stream] = inc_str
+            incomplete_hypothesis_items.append(f"- **PRED_M3_B8_TIES ({stream})**: **{inc_str}**")
+            continue
+
+        m3_b8_max_by_pol: Dict[str, float] = {pol: 0.0 for pol in REFRESH_RULES}
+        af_runs_b8 = idx_m3[(stream, "time_segment_g", 8, 200, "arithmetic", "always_fresh")]
+        for ref_pol in REFRESH_RULES:
+            comp_tie_m3 = compare_pair(
+                idx_m3,
+                stream,
+                "time_segment_g",
+                8,
+                200,
+                "arithmetic",
+                ref_pol,
+                "always_fresh",
+                expected_seeds=m3_seeds,
+                scan_res=scan_m3,
+            )
+            comp_tie_m3["experiment"] = "M3"
+            comp_tie_m3["comparison_type"] = "PRED_M3_B8_TIES_B8"
+
+            pol_runs_b8 = idx_m3[(stream, "time_segment_g", 8, 200, "arithmetic", ref_pol)]
+            pol_b8_max = 0.0
+            for seed in m3_seeds:
+                arr_af = np.asarray(af_runs_b8[seed]["q_recent"], dtype=np.float64)
+                arr_pol = np.asarray(pol_runs_b8[seed]["q_recent"], dtype=np.float64)
+                if arr_af.shape != arr_pol.shape or not np.array_equal(np.isnan(arr_af), np.isnan(arr_pol)):
+                    pol_b8_max = float("inf")
+                else:
+                    valid_mask = ~np.isnan(arr_af)
+                    if np.any(valid_mask):
+                        d_max = float(np.max(np.abs(arr_pol[valid_mask] - arr_af[valid_mask])))
+                        pol_b8_max = max(pol_b8_max, d_max)
+            comp_tie_m3["max_abs_query_diff"] = pol_b8_max
+            paired_rows.append(comp_tie_m3)
+            m3_b8_max_by_pol[ref_pol] = pol_b8_max
+
+        m3_b8_max_abs_diff = max(m3_b8_max_by_pol[r] for r in m3_b8_tie_rules)
+        m3_b8_tie_pass = bool(m3_b8_max_abs_diff == 0.0)
+        m3_b8_tie_status = "PASS" if m3_b8_tie_pass else "FAIL"
+        rule_breakdown = (
+            ", ".join(f"{r}:{m3_b8_max_by_pol[r] * 100.0:.2f} pp" for r in m3_b8_tie_rules)
+            + f"; recovered_neighbor(k=7):{m3_b8_max_by_pol['recovered_neighbor'] * 100.0:.2f} pp"
+        )
+        val_str = (
+            f"max_{{rr,dc,ql,ss}} |recent_recall@10(rule) - recent_recall@10(always_fresh)| = "
+            f"{m3_b8_max_abs_diff * 100.0:.2f} pp ({m3_b8_max_abs_diff:.6f}; {rule_breakdown}) "
+            f"**[{m3_b8_tie_status}]**"
+        )
+        pred_m3_b8_ties_disp[stream] = val_str
+        if not m3_b8_tie_pass:
+            failed_hypothesis_items.append(f"- **PRED_M3_B8_TIES ({stream})**: **FAIL** ({val_str})")
+        pred_m3_b8_ties_outcomes[stream] = {
+            "complete": True,
+            "status": m3_b8_tie_status,
+            "max_abs_diff": m3_b8_max_abs_diff,
+            "max_abs_diff_by_policy": m3_b8_max_by_pol,
+            "pass": m3_b8_tie_pass,
+        }
+
+    pred_m3_b8_ties_outcome_str = (
+        f"steady={pred_m3_b8_ties_outcomes['steady']['status']}, "
+        f"new_topic={pred_m3_b8_ties_outcomes['new_topic']['status']}"
+    )
+    hypothesis_rows.append(
+        {
+            "hypothesis": "PRED_M3_B8_TIES",
+            "experiment": "M3 (time_segment_g, G=8, Q=200, B=8)",
+            "rule": "At B=8, round_robin, data_change, ql, ss (k=8=G) equal always_fresh per query (max_abs_diff == 0.0); recovered_neighbor (k=7) not predicted to tie",
+            "steady_value": pred_m3_b8_ties_disp["steady"],
+            "new_topic_value": pred_m3_b8_ties_disp["new_topic"],
+            "outcome": pred_m3_b8_ties_outcome_str,
+        }
+    )
+
     # --- GATE_M3 (M3, time_segment_g, G=8, Q=200, B=4): always_fresh - never_refresh >= 0.05 per stream ---
     gate_m3_outcomes: Dict[str, Dict[str, Any]] = {}
     gate_m3_disp: Dict[str, str] = {}
@@ -2338,6 +2471,9 @@ def analyze_all(
                     "best_refresh_recent_recall": float("nan"),
                     "extra_search_online_recent_recall": float("nan"),
                     "push_vectors_recent_recall": float("nan"),
+                    "best_refresh_budget_bytes_mean": float("nan"),
+                    "extra_search_online_budget_bytes_mean": float("nan"),
+                    "push_vectors_budget_bytes_mean": float("nan"),
                     "refresh_minus_extra_search_online_mean": float("nan"),
                     "refresh_minus_extra_search_online_ci95_low": float("nan"),
                     "refresh_minus_extra_search_online_ci95_high": float("nan"),
@@ -2411,6 +2547,7 @@ def analyze_all(
 
         # Break-even Q sweep across Q in {50, 200, 800} using the FIXED Q=200 best refresh rule `best_refresh_pol`
         q_gaps: List[Tuple[int, float]] = []
+        q_bytes_parts: List[str] = []
         sweep_missing: List[str] = []
         stream_be_rows: List[Dict[str, Any]] = []
         for q_val in (50, 200, 800):
@@ -2425,6 +2562,7 @@ def analyze_all(
             )
             if not q_ok:
                 sweep_missing.extend(q_miss)
+                q_bytes_parts.append(f"Q={q_val}: {format_incomplete_status(q_miss)}")
                 stream_be_rows.append(
                     {
                         "stream_mode": stream,
@@ -2436,6 +2574,9 @@ def analyze_all(
                         "best_refresh_recent_recall": float("nan"),
                         "extra_search_online_recent_recall": float("nan"),
                         "push_vectors_recent_recall": float("nan"),
+                        "best_refresh_budget_bytes_mean": float("nan"),
+                        "extra_search_online_budget_bytes_mean": float("nan"),
+                        "push_vectors_budget_bytes_mean": float("nan"),
                         "refresh_minus_extra_search_online_mean": float("nan"),
                         "refresh_minus_extra_search_online_ci95_low": float("nan"),
                         "refresh_minus_extra_search_online_ci95_high": float("nan"),
@@ -2497,6 +2638,11 @@ def analyze_all(
             pv_rec = float(sub_cell_m1[sub_cell_m1["policy"] == "push_vectors"]["recent_recall_at_10_mean"].iloc[0])
 
             q_gaps.append((q_val, float(ref_vs_eso["recent_diff_mean"])))
+            q_bytes_parts.append(
+                f"Q={q_val}[{best_refresh_pol}={ref_vs_eso['budget_bytes_a_mean']:,.0f}, "
+                f"ESO={ref_vs_eso['budget_bytes_b_mean']:,.0f}, "
+                f"PV={ref_vs_pv['budget_bytes_b_mean']:,.0f}]"
+            )
             stream_be_rows.append(
                 {
                     "stream_mode": stream,
@@ -2508,6 +2654,9 @@ def analyze_all(
                     "best_refresh_recent_recall": ref_rec,
                     "extra_search_online_recent_recall": eso_rec,
                     "push_vectors_recent_recall": pv_rec,
+                    "best_refresh_budget_bytes_mean": ref_vs_eso["budget_bytes_a_mean"],
+                    "extra_search_online_budget_bytes_mean": ref_vs_eso["budget_bytes_b_mean"],
+                    "push_vectors_budget_bytes_mean": ref_vs_pv["budget_bytes_b_mean"],
                     "refresh_minus_extra_search_online_mean": ref_vs_eso["recent_diff_mean"],
                     "refresh_minus_extra_search_online_ci95_low": ref_vs_eso["recent_diff_ci95_low"],
                     "refresh_minus_extra_search_online_ci95_high": ref_vs_eso["recent_diff_ci95_high"],
@@ -2567,8 +2716,9 @@ def analyze_all(
             f"{fmt_diff_pts(eso_vs_best['recent_diff_mean'], eso_vs_best['recent_diff_ci95_low'], eso_vs_best['recent_diff_ci95_high'])}; "
             f"PV vs `{best_refresh_pol}`: "
             f"{fmt_diff_pts(pv_vs_best_b['recent_diff_mean'], pv_vs_best_b['recent_diff_ci95_low'], pv_vs_best_b['recent_diff_ci95_high'])} "
-            f"(bytes: ESO={eso_vs_best['budget_bytes_a_mean']:,.0f}, PV={pv_vs_best_b['budget_bytes_a_mean']:,.0f}, "
-            f"{best_refresh_pol}={eso_vs_best['budget_bytes_b_mean']:,.0f}); "
+            f"(bytes at Q=200: ESO={eso_vs_best['budget_bytes_a_mean']:,.0f}, PV={pv_vs_best_b['budget_bytes_a_mean']:,.0f}, "
+            f"{best_refresh_pol}={eso_vs_best['budget_bytes_b_mean']:,.0f}; "
+            f"Q-sweep bytes: {'; '.join(q_bytes_parts)}); "
             f"Break-even: {breakeven_str}"
         )
         h2b_stream_disp[stream] = disp_str
@@ -2831,7 +2981,8 @@ def analyze_all(
                 stream_la_parts.append(f"M1(B=4,Q={q_val}): {comp_la_m1['status']}")
             else:
                 stream_la_parts.append(
-                    f"M1(B=4,Q={q_val}): {fmt_diff_pts(comp_la_m1['recent_diff_mean'], comp_la_m1['recent_diff_ci95_low'], comp_la_m1['recent_diff_ci95_high'])}"
+                    f"M1(B=4,Q={q_val}): {fmt_diff_pts(comp_la_m1['recent_diff_mean'], comp_la_m1['recent_diff_ci95_low'], comp_la_m1['recent_diff_ci95_high'])} "
+                    f"(bytes: ES={comp_la_m1['budget_bytes_a_mean']:,.0f}, ESO={comp_la_m1['budget_bytes_b_mean']:,.0f})"
                 )
 
         # M3 across B in {2, 4, 8} at Q=200
@@ -2866,7 +3017,8 @@ def analyze_all(
                 stream_la_parts.append(f"M3(B={b_sum},Q=200): {comp_la_m3['status']}")
             else:
                 stream_la_parts.append(
-                    f"M3(B={b_sum},Q=200): {fmt_diff_pts(comp_la_m3['recent_diff_mean'], comp_la_m3['recent_diff_ci95_low'], comp_la_m3['recent_diff_ci95_high'])}"
+                    f"M3(B={b_sum},Q=200): {fmt_diff_pts(comp_la_m3['recent_diff_mean'], comp_la_m3['recent_diff_ci95_low'], comp_la_m3['recent_diff_ci95_high'])} "
+                    f"(bytes: ES={comp_la_m3['budget_bytes_a_mean']:,.0f}, ESO={comp_la_m3['budget_bytes_b_mean']:,.0f})"
                 )
 
         if stream_la_missing:
@@ -3017,6 +3169,7 @@ def analyze_all(
         "scan_m1_online": scan_m1_online,
         "scan_m3": scan_m3,
         "pred_m2_ties": pred_m2_ties_outcomes,
+        "pred_m3_b8_ties": pred_m3_b8_ties_outcomes,
     }
 
 
@@ -3240,19 +3393,24 @@ def write_summary_markdown(
     lines.append("")
     lines.append("### 5a. H2 (`extra_search` on `M1`)")
     lines.append("")
-    lines.append("| Stream | $Q$ | Fixed $Q=200$ Best Refresh Rule (Gap to 2nd) | Best Refresh Recent Recall@10 | `extra_search` Recent Recall@10 | `push_vectors` Recent Recall@10 | `best_refresh - extra_search` (pp, 95% CI) | `best_refresh - push_vectors` (pp, 95% CI) | Break-Even $Q$ (Refresh vs. `extra_search`) |")
-    lines.append("|---|---:|---|---:|---:|---:|---|---|---|")
+    lines.append("| Stream | $Q$ | Fixed $Q=200$ Best Refresh Rule (Gap to 2nd) | Best Refresh Recent Recall@10 | `extra_search` Recent Recall@10 | `push_vectors` Recent Recall@10 | `best_refresh - extra_search` (pp, 95% CI) | `best_refresh - push_vectors` (pp, 95% CI) | Mean Budget Bytes (Refresh / ES / PV) | Break-Even $Q$ (Refresh vs. `extra_search`) |")
+    lines.append("|---|---:|---|---:|---:|---:|---|---|---|---|")
     for _, r in df_breakeven.iterrows():
         stream = str(r["stream_mode"])
         if r["status"] != "COMPLETE":
             lines.append(
                 f"| `{stream}` | {int(r['queries_per_epoch'])} | `{r['best_refresh_policy']}` "
-                f"| NaN | NaN | NaN | {r['status']} | {r['status']} | {r['breakeven_q']} |"
+                f"| NaN | NaN | NaN | {r['status']} | {r['status']} | NaN | {r['breakeven_q']} |"
             )
         else:
             rule_lbl = (
                 f"`{r['best_refresh_policy']}` "
                 f"({r['gap_to_second_best_pp']:+.2f} pp vs `{r['second_best_refresh_policy']}`)"
+            )
+            bytes_col = (
+                f"{r['best_refresh_budget_bytes_mean']:,.0f} / "
+                f"{r['extra_search_budget_bytes_mean']:,.0f} / "
+                f"{r['push_vectors_budget_bytes_mean']:,.0f}"
             )
             lines.append(
                 f"| `{stream}` | {int(r['queries_per_epoch'])} | {rule_lbl} "
@@ -3261,25 +3419,31 @@ def write_summary_markdown(
                 f"| {r['push_vectors_recent_recall']:.4f} "
                 f"| {fmt_diff_pts(r['refresh_minus_extra_search_mean'], r['refresh_minus_extra_search_ci95_low'], r['refresh_minus_extra_search_ci95_high'])} "
                 f"| {fmt_diff_pts(r['refresh_minus_push_vectors_mean'], r['refresh_minus_push_vectors_ci95_low'], r['refresh_minus_push_vectors_ci95_high'])} "
+                f"| {bytes_col} "
                 f"| {r['breakeven_q']} |"
             )
     lines.append("")
 
     lines.append("### 5b. H2b (`extra_search_online` on `M1 + M1_online`)")
     lines.append("")
-    lines.append("| Stream | $Q$ | Fixed $Q=200$ Best Refresh Rule (Gap to 2nd) | Best Refresh Recent Recall@10 | `extra_search_online` Recent Recall@10 | `push_vectors` Recent Recall@10 | `best_refresh - extra_search_online` (pp, 95% CI) | `best_refresh - push_vectors` (pp, 95% CI) | Break-Even $Q$ (Refresh vs. `extra_search_online`) |")
-    lines.append("|---|---:|---|---:|---:|---:|---|---|---|")
+    lines.append("| Stream | $Q$ | Fixed $Q=200$ Best Refresh Rule (Gap to 2nd) | Best Refresh Recent Recall@10 | `extra_search_online` Recent Recall@10 | `push_vectors` Recent Recall@10 | `best_refresh - extra_search_online` (pp, 95% CI) | `best_refresh - push_vectors` (pp, 95% CI) | Mean Budget Bytes (Refresh / ESO / PV) | Break-Even $Q$ (Refresh vs. `extra_search_online`) |")
+    lines.append("|---|---:|---|---:|---:|---:|---|---|---|---|")
     for _, r in df_breakeven_online.iterrows():
         stream = str(r["stream_mode"])
         if r["status"] != "COMPLETE":
             lines.append(
                 f"| `{stream}` | {int(r['queries_per_epoch'])} | `{r['best_refresh_policy']}` "
-                f"| NaN | NaN | NaN | {r['status']} | {r['status']} | {r['breakeven_q']} |"
+                f"| NaN | NaN | NaN | {r['status']} | {r['status']} | NaN | {r['breakeven_q']} |"
             )
         else:
             rule_lbl = (
                 f"`{r['best_refresh_policy']}` "
                 f"({r['gap_to_second_best_pp']:+.2f} pp vs `{r['second_best_refresh_policy']}`)"
+            )
+            bytes_col = (
+                f"{r['best_refresh_budget_bytes_mean']:,.0f} / "
+                f"{r['extra_search_online_budget_bytes_mean']:,.0f} / "
+                f"{r['push_vectors_budget_bytes_mean']:,.0f}"
             )
             lines.append(
                 f"| `{stream}` | {int(r['queries_per_epoch'])} | {rule_lbl} "
@@ -3288,6 +3452,7 @@ def write_summary_markdown(
                 f"| {r['push_vectors_recent_recall']:.4f} "
                 f"| {fmt_diff_pts(r['refresh_minus_extra_search_online_mean'], r['refresh_minus_extra_search_online_ci95_low'], r['refresh_minus_extra_search_online_ci95_high'])} "
                 f"| {fmt_diff_pts(r['refresh_minus_push_vectors_mean'], r['refresh_minus_push_vectors_ci95_low'], r['refresh_minus_push_vectors_ci95_high'])} "
+                f"| {bytes_col} "
                 f"| {r['breakeven_q']} |"
             )
     lines.append("")
@@ -3443,8 +3608,20 @@ def main() -> None:
         default=Path(__file__).resolve().parent.parent / "configs",
         help="Directory containing main_M1.yaml, main_M2.yaml, main_sens.yaml, main_M1_online.yaml, main_M3.yaml.",
     )
+    parser.add_argument(
+        "--prereg2-results-root",
+        dest="prereg2_results_root",
+        type=Path,
+        default=None,
+        help="Optional separate root containing main/M1_online and main/M3 when not using a combined analysis root.",
+    )
     args = parser.parse_args()
-    analyze_all(results_root=args.results_root, out_dir=args.out_dir, configs_dir=args.configs_dir)
+    analyze_all(
+        results_root=args.results_root,
+        out_dir=args.out_dir,
+        configs_dir=args.configs_dir,
+        prereg2_results_root=args.prereg2_results_root,
+    )
 
 
 if __name__ == "__main__":

@@ -1044,30 +1044,88 @@ def test_11_extra_search_online_causal_and_budget(real_subset_data) -> None:
     they arrive, and changing later queries in an epoch does not change earlier queries' decisions."""
     init_v, init_id, stream_v, stream_id, test_q, test_qid, sample_q, sample_qid = real_subset_data
 
-    # 11a. Never exceeds budget across B in {1, 2, 4}
+    # 11a. Never exceeds budget across B in {1, 2, 4}, and end-to-end spy verifies that
+    # start_online_epoch in epoch e >= 1 receives exact gaps from epoch e - 1 (no run.py leak).
+    orig_start_online = PolicyController.start_online_epoch
+    orig_decide_online = PolicyController.decide_extra_search_online_query
+
     for budget_summaries in (1, 2, 4):
         budget_bytes = budget_summaries * SUMMARY_BYTES
         max_extra = budget_bytes // SHARD_SEARCH_BYTES
-        res = run_single_simulation(
-            initial_vectors=init_v,
-            initial_ids=init_id,
-            stream_vectors=stream_v,
-            stream_ids=stream_id,
-            test_queries=test_q,
-            test_query_ids=test_qid,
-            sample_queries=sample_q,
-            sample_query_ids=sample_qid,
-            policy="extra_search_online",
-            num_shards=8,
-            m=2,
-            budget_summaries=budget_summaries,
-            num_epochs=4,
-            inserts_per_epoch=150,
-            queries_per_epoch=40,
-            placement_mode="time_segment_g",
-            active_segments=3,
-            seed=42,
-        )
+        recorded_prev_gaps: dict[int, np.ndarray] = {}
+        recorded_live_gaps: dict[int, list[float]] = {}
+        current_ep_box = [0]
+
+        def spy_start_online(self_ctrl, epoch, coordinator, sample_queries):
+            ep = int(epoch)
+            current_ep_box[0] = ep
+            if ep == 0:
+                assert self_ctrl._prev_epoch_query_gaps is None
+            else:
+                assert self_ctrl._prev_epoch_query_gaps is not None
+                recorded_prev_gaps[ep] = np.array(
+                    self_ctrl._prev_epoch_query_gaps, dtype=np.float64, copy=True
+                )
+            return orig_start_online(self_ctrl, epoch, coordinator, sample_queries)
+
+        def spy_decide_online(
+            self_ctrl,
+            q_idx,
+            query_vec,
+            coordinator,
+            ranked_shards=None,
+            ranked_scores=None,
+        ):
+            res_extra = orig_decide_online(
+                self_ctrl,
+                q_idx,
+                query_vec,
+                coordinator,
+                ranked_shards=ranked_shards,
+                ranked_scores=ranked_scores,
+            )
+            ep = current_ep_box[0]
+            recorded_live_gaps.setdefault(ep, []).append(
+                float(self_ctrl._current_epoch_query_gaps[-1])
+            )
+            if res_extra and ranked_shards is not None:
+                assert res_extra == [int(ranked_shards[self_ctrl.m])]
+            return res_extra
+
+        with patch.object(
+            PolicyController, "start_online_epoch", autospec=True, side_effect=spy_start_online
+        ), patch.object(
+            PolicyController,
+            "decide_extra_search_online_query",
+            autospec=True,
+            side_effect=spy_decide_online,
+        ):
+            res = run_single_simulation(
+                initial_vectors=init_v,
+                initial_ids=init_id,
+                stream_vectors=stream_v,
+                stream_ids=stream_id,
+                test_queries=test_q,
+                test_query_ids=test_qid,
+                sample_queries=sample_q,
+                sample_query_ids=sample_qid,
+                policy="extra_search_online",
+                num_shards=8,
+                m=2,
+                budget_summaries=budget_summaries,
+                num_epochs=4,
+                inserts_per_epoch=150,
+                queries_per_epoch=40,
+                placement_mode="time_segment_g",
+                active_segments=3,
+                seed=42,
+            )
+        for ep in range(1, 4):
+            assert ep in recorded_prev_gaps
+            assert np.array_equal(
+                recorded_prev_gaps[ep],
+                np.asarray(recorded_live_gaps[ep - 1], dtype=np.float64),
+            )
         for _, row in res.epochs_df.iterrows():
             spent = int(row["budget_bytes_spent"])
             n_ext = int(row["num_extra_searches"])
@@ -1077,7 +1135,8 @@ def test_11_extra_search_online_causal_and_budget(real_subset_data) -> None:
             assert int(row["bytes_summary_refresh"]) == 0
 
     # 11b. Changing later queries in an epoch does NOT change earlier queries' decisions or results,
-    # and queries[j] for j > q_idx is never accessed while deciding q_idx.
+    # queries[j] for j > q_idx is never accessed while deciding q_idx, and decisions match exact
+    # hand-recomputed threshold tau_1 (from epoch 0) and target shard s_(m+1) (rank m).
     rng = np.random.default_rng(101)
     num_shards = 6
     m = 2
@@ -1093,13 +1152,17 @@ def test_11_extra_search_online_causal_and_budget(real_subset_data) -> None:
     queries_epoch0 = test_q[:20].copy()
     queries_a = test_q[20:40].copy()
     queries_b = queries_a.copy()
-    # Replace queries 10..19 in queries_b with completely different vectors (including near-zero-gap vectors)
+    # Replace queries 10..19 in queries_b with vectors having a tiny but unambiguous (m, m+1) gap
     c0 = shards[0].published_summary.centers[0]
     c1 = shards[1].published_summary.centers[0]
     c2 = shards[2].published_summary.centers[0]
-    zero_gap_q = normalize_l2((c0 + c1 + c2).reshape(1, DIM))[0]
+    small_gap_q = normalize_l2((1.20 * c0 + 1.001 * c1 + 1.000 * c2).reshape(1, DIM))[0]
     for idx in range(10, 20):
-        queries_b[idx] = zero_gap_q if idx % 2 == 0 else normalize_l2(rng.standard_normal((1, DIM)).astype(np.float32))[0]
+        queries_b[idx] = (
+            small_gap_q
+            if idx % 2 == 0
+            else normalize_l2(rng.standard_normal((1, DIM)).astype(np.float32))[0]
+        )
 
     class CausalQueryStream:
         """Wrapper that forbids reading any query at index > max_allowed_idx."""
@@ -1150,6 +1213,15 @@ def test_11_extra_search_online_causal_and_budget(real_subset_data) -> None:
         )
         assert stream0.last_read_idx == len(queries_epoch0) - 1
 
+        _, rk0, rsc0 = coord.route_queries(queries_epoch0, m=m)
+        used0, exp0 = 0, {}
+        for q in range(len(queries_epoch0)):
+            g0 = rsc0[q, m - 1] - rsc0[q, m]
+            if used0 < 5 and g0 <= expected_tau0:
+                exp0[q] = [int(rk0[q, m])]
+                used0 += 1
+        assert dec0.extra_shards_per_query == exp0
+
         # Epoch 1: uses epoch 0's test queries' gaps for tau_1
         dec1 = ctrl.step_epoch(epoch=1, shards=shards, coordinator=coord, bus=bus, sample_queries=sample_q)
         _, _, m1 = coord.route_queries(queries_epoch0, m=m)
@@ -1166,10 +1238,20 @@ def test_11_extra_search_online_causal_and_budget(real_subset_data) -> None:
             online_decision=dec1,
         )
         assert stream1.last_read_idx == len(ep1_queries) - 1
-        return dec0, ret0, mask0, dec1, ret1, mask1
 
-    _, _, _, dec1_a, ret1_a, mask1_a = _run_two_epochs(queries_a)
-    _, _, _, dec1_b, ret1_b, mask1_b = _run_two_epochs(queries_b)
+        _, rk, rsc = coord.route_queries(ep1_queries, m=m)
+        used, exp = 0, {}
+        for q in range(len(ep1_queries)):
+            g = rsc[q, m - 1] - rsc[q, m]
+            if used < 5 and g <= expected_tau1:
+                exp[q] = [int(rk[q, m])]
+                used += 1
+        assert dec1.extra_shards_per_query == exp
+
+        return coord, dec0, ret0, mask0, dec1, ret1, mask1
+
+    _, _, _, _, dec1_a, ret1_a, mask1_a = _run_two_epochs(queries_a)
+    _, _, _, _, dec1_b, ret1_b, mask1_b = _run_two_epochs(queries_b)
 
     # Earlier queries 0..9 in epoch 1 must have identical extra-search decisions and identical results
     for q_i in range(10):
@@ -1210,17 +1292,17 @@ def test_12_defaults_unchanged_vs_previous_code_version(tmp_path) -> None:
             "experiment: compare_defaults",
             "initial_vectors_limit: 600",
             "stream_vectors_limit: 300",
-            "num_shards: 4",
+            "num_shards: 8",
             "c: 8",
             "m: 2",
             "budget_summaries: 2",
             "num_epochs: 3",
             "inserts_per_epoch: 100",
             "queries_per_epoch: 20",
-            "stream_modes: [steady]",
+            "stream_modes: [steady, new_topic]",
             "placement_mode: [nearest_initial, time_segment]",
             "seeds: [42]",
-            "policies: [never_refresh, always_fresh, round_robin, data_change, recovered_neighbor, extra_search, push_vectors]",
+            "policies: [never_refresh, always_fresh, oracle_routing, all_shards, round_robin, data_change, recovered_neighbor, ql, ss, extra_search, push_vectors]",
             "num_workers: 1",
         ]),
         encoding="utf-8",
@@ -1263,51 +1345,104 @@ def test_12_defaults_unchanged_vs_previous_code_version(tmp_path) -> None:
         use_gt_cache=True,
     )
 
-    old_exp_dir = out_old / "compare_defaults"
-    new_exp_dir = out_new / "compare_defaults"
-    old_run_dirs = sorted(d.name for d in old_exp_dir.iterdir() if d.is_dir())
-    new_run_dirs = sorted(d.name for d in new_exp_dir.iterdir() if d.is_dir())
-    assert old_run_dirs == new_run_dirs
-    assert len(old_run_dirs) == 14
+    def _assert_exp_dirs_equal(old_exp_dir: Path, new_exp_dir: Path, expected_count: int) -> None:
+        old_run_dirs = sorted(d.name for d in old_exp_dir.iterdir() if d.is_dir())
+        new_run_dirs = sorted(d.name for d in new_exp_dir.iterdir() if d.is_dir())
+        assert old_run_dirs == new_run_dirs
+        assert len(old_run_dirs) == expected_count
 
-    for rid in old_run_dirs:
-        d_old = old_exp_dir / rid
-        d_new = new_exp_dir / rid
+        for rid in old_run_dirs:
+            d_old = old_exp_dir / rid
+            d_new = new_exp_dir / rid
 
-        # 1. Compare queries.npz bit for bit
-        with np.load(d_old / "queries.npz", allow_pickle=False) as q_old, np.load(
-            d_new / "queries.npz", allow_pickle=False
-        ) as q_new:
-            assert set(q_old.files) == set(q_new.files)
-            for k in q_old.files:
-                a_old = q_old[k]
-                a_new = q_new[k]
-                assert a_old.dtype == a_new.dtype
-                assert np.array_equal(np.nan_to_num(a_old, nan=-999.0), np.nan_to_num(a_new, nan=-999.0))
-                assert np.array_equal(np.isnan(a_old), np.isnan(a_new))
+            # 1. Compare queries.npz bit for bit
+            with np.load(d_old / "queries.npz", allow_pickle=False) as q_old, np.load(
+                d_new / "queries.npz", allow_pickle=False
+            ) as q_new:
+                assert set(q_old.files) == set(q_new.files)
+                for k in q_old.files:
+                    a_old = q_old[k]
+                    a_new = q_new[k]
+                    assert a_old.dtype == a_new.dtype
+                    assert np.array_equal(np.nan_to_num(a_old, nan=-999.0), np.nan_to_num(a_new, nan=-999.0))
+                    assert np.array_equal(np.isnan(a_old), np.isnan(a_new))
 
-        # 2. Compare epochs.parquet bit for bit on all non-CPU columns
-        df_old = pd.read_parquet(d_old / "epochs.parquet")
-        df_new = pd.read_parquet(d_new / "epochs.parquet")
-        assert list(df_old.columns) == list(df_new.columns)
-        non_cpu_cols = [c for c in df_old.columns if not c.startswith("cpu_")]
-        pd.testing.assert_frame_equal(df_old[non_cpu_cols], df_new[non_cpu_cols], check_exact=True)
+            # 2. Compare epochs.parquet bit for bit on all non-CPU columns
+            df_old = pd.read_parquet(d_old / "epochs.parquet")
+            df_new = pd.read_parquet(d_new / "epochs.parquet")
+            assert list(df_old.columns) == list(df_new.columns)
+            non_cpu_cols = [c for c in df_old.columns if not c.startswith("cpu_")]
+            pd.testing.assert_frame_equal(df_old[non_cpu_cols], df_new[non_cpu_cols], check_exact=True)
 
-        # 3. Compare summary.json keys and all non-CPU values bit for bit
-        s_old = json.loads((d_old / "summary.json").read_text(encoding="utf-8"))
-        s_new = json.loads((d_new / "summary.json").read_text(encoding="utf-8"))
-        assert set(s_old.keys()) == set(s_new.keys())
-        for k in s_old:
-            if not k.startswith("cpu_"):
-                if isinstance(s_old[k], float) and np.isnan(s_old[k]):
-                    assert np.isnan(s_new[k])
-                else:
-                    assert s_old[k] == s_new[k], f"Mismatch in {rid} summary[{k}]: {s_old[k]} vs {s_new[k]}"
+            # 3. Compare summary.json keys and all non-CPU values bit for bit
+            s_old = json.loads((d_old / "summary.json").read_text(encoding="utf-8"))
+            s_new = json.loads((d_new / "summary.json").read_text(encoding="utf-8"))
+            assert set(s_old.keys()) == set(s_new.keys())
+            for k in s_old:
+                if not k.startswith("cpu_"):
+                    if isinstance(s_old[k], float) and np.isnan(s_old[k]):
+                        assert np.isnan(s_new[k])
+                    else:
+                        assert s_old[k] == s_new[k], f"Mismatch in {rid} summary[{k}]: {s_old[k]} vs {s_new[k]}"
 
-        # 4. Compare provenance.json config dict
-        p_old = json.loads((d_old / "provenance.json").read_text(encoding="utf-8"))
-        p_new = json.loads((d_new / "provenance.json").read_text(encoding="utf-8"))
-        assert p_old["config"] == p_new["config"]
-        assert p_old["config_sha256"] == p_new["config_sha256"]
-        assert p_old["data_provenance_sha256"] == p_new["data_provenance_sha256"]
+            # 4. Compare provenance.json config dict
+            p_old = json.loads((d_old / "provenance.json").read_text(encoding="utf-8"))
+            p_new = json.loads((d_new / "provenance.json").read_text(encoding="utf-8"))
+            assert p_old["config"] == p_new["config"]
+            assert p_old["config_sha256"] == p_new["config_sha256"]
+            assert p_old["data_provenance_sha256"] == p_new["data_provenance_sha256"]
+
+    _assert_exp_dirs_equal(out_old / "compare_defaults", out_new / "compare_defaults", 44)
+
+    # Also test a 2-worker run (--workers 2 / num_workers=2)
+    cfg_w2_path = tmp_path / "compare_defaults_w2.yaml"
+    cfg_w2_path.write_text(
+        "\n".join([
+            "experiment: compare_defaults_w2",
+            "initial_vectors_limit: 600",
+            "stream_vectors_limit: 300",
+            "num_shards: 8",
+            "c: 8",
+            "m: 2",
+            "budget_summaries: 2",
+            "num_epochs: 3",
+            "inserts_per_epoch: 100",
+            "queries_per_epoch: 20",
+            "stream_modes: [steady]",
+            "placement_mode: [nearest_initial]",
+            "seeds: [42]",
+            "policies: [never_refresh, data_change, extra_search, push_vectors]",
+            "num_workers: 2",
+        ]),
+        encoding="utf-8",
+    )
+    out_old_w2 = tmp_path / "out_old_w2"
+    out_new_w2 = tmp_path / "out_new_w2"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "dvs.run",
+            "--config",
+            str(cfg_w2_path),
+            "--data-dir",
+            str(DATA_DIR),
+            "--results-dir",
+            str(out_old_w2),
+            "--workers",
+            "2",
+        ],
+        cwd=str(old_code_root),
+        env=env_old,
+        check=True,
+    )
+    run_from_config(
+        config_path=cfg_w2_path,
+        repo_root=REPO_ROOT,
+        data_dir=DATA_DIR,
+        results_root=out_new_w2,
+        num_workers=2,
+        use_gt_cache=True,
+    )
+    _assert_exp_dirs_equal(out_old_w2 / "compare_defaults_w2", out_new_w2 / "compare_defaults_w2", 4)
 
