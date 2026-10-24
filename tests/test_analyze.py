@@ -15,6 +15,16 @@ Covers using lightweight synthetic run folders (small numpy arrays):
 
 from __future__ import annotations
 
+import os
+
+for _blas_env_var in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(_blas_env_var, "1")
+
 import json
 import shutil
 import subprocess
@@ -46,7 +56,7 @@ def _target_recent_recall(
     policy: str,
 ) -> float:
     """Deterministic target recent recall@10 in [0.1, 0.95] encoding known hypothesis effects."""
-    if exp_label == "M1":
+    if exp_label in ("M1", "M1_online"):
         # H1 at Q=200, B=4: always_fresh - never_refresh = 0.015 (< 0.05) -> PASS on both streams
         if policy == "never_refresh":
             return 0.500
@@ -60,11 +70,11 @@ def _target_recent_recall(
         # Refresh rules on M1: data_change is best at Q=200 (0.540), recovered_neighbor is 2nd (0.515, gap +2.50 pp)
         if policy == "data_change":
             if stream == "steady":
-                # Break-even crossing between Q=200 and Q=800 against extra_search (0.600):
-                # Q=50: 0.520 (< 0.600), Q=200: 0.540 (< 0.600), Q=800: 0.640 (> 0.600)
+                # Break-even crossing between Q=200 and Q=800 against extra_search (0.600) and extra_search_online (0.590):
+                # Q=50: 0.520 (< 0.590), Q=200: 0.540 (< 0.590), Q=800: 0.640 (> 0.600)
                 return {50: 0.520, 200: 0.540, 800: 0.640}[q_val]
             else:
-                # new_topic: extra_search (0.600) ahead at all Q in {50, 200, 800}
+                # new_topic: extra_search (0.600) and extra_search_online (0.590) ahead at all Q in {50, 200, 800}
                 return {50: 0.510, 200: 0.540, 800: 0.570}[q_val]
         if policy == "recovered_neighbor":
             return 0.515
@@ -75,14 +85,16 @@ def _target_recent_recall(
         if policy == "ss":
             return 0.495
 
-        # Alternatives at M1: beat best refresh (0.540) at Q=200 on both streams
+        # Alternatives at M1 / M1_online: beat best refresh (0.540) at Q=200 on both streams
         if policy == "extra_search":
             return 0.600
+        if policy == "extra_search_online":
+            return 0.590
         if policy == "push_vectors":
             return 0.585
 
-    # M2 and sens (time_segment)
-    # GATE_M2 at Q=200, B=4: always_fresh (0.650) - never_refresh (0.500) = +0.150 (>= 0.05) -> PASS on both streams
+    # M2, sens (time_segment) and M3 (time_segment_g, G=8)
+    # GATE_M2 / GATE_M3 at Q=200, B=4: always_fresh (0.650) - never_refresh (0.500) = +0.150 (>= 0.05) -> PASS on both streams
     if policy == "never_refresh":
         return 0.500
     if policy == "always_fresh":
@@ -92,13 +104,13 @@ def _target_recent_recall(
     if policy == "all_shards":
         return 0.930
 
-    # Refresh rules on M2:
+    # Refresh rules on M2 / M3:
     # recovered_neighbor is best refresh rule at all B (0.620 at B=2, 0.680 at B=4, 0.740 at B=8)
     if policy == "recovered_neighbor":
         return {2: 0.620, 4: 0.680, 8: 0.740}[b_sum]
     if policy == "data_change":
-        # On steady at B=4: 0.590 (RN beats by +9.0 pp >= 5.0 pp -> H3 steady PASS)
-        # On new_topic at B=4: 0.655 (RN beats by +2.5 pp < 5.0 pp -> H3 new_topic FAIL)
+        # On steady at B=4: 0.590 (RN beats by +9.0 pp >= 5.0 pp -> H3 / H3b steady PASS)
+        # On new_topic at B=4: 0.655 (RN beats by +2.5 pp < 5.0 pp -> H3 / H3b new_topic FAIL)
         if stream == "steady":
             return {2: 0.560, 4: 0.590, 8: 0.650}[b_sum]
         else:
@@ -110,12 +122,14 @@ def _target_recent_recall(
     if policy == "ss":
         return {2: 0.520, 4: 0.560, 8: 0.610}[b_sum]
 
-    # Alternatives on M2 (H4 across B in {2, 4, 8}):
-    # At B=2: extra_search (0.690) beats recovered_neighbor (0.620) and push_vectors (0.600) -> FAIL (winner: extra_search)
-    # At B=4: recovered_neighbor (0.680) beats extra_search (0.620) and push_vectors (0.600) -> PASS (winner: recovered_neighbor)
-    # At B=8: recovered_neighbor (0.740) beats extra_search (0.660) and push_vectors (0.630) -> PASS (winner: recovered_neighbor)
+    # Alternatives on M2 (H4) and M3 (H4b across B in {2, 4, 8}):
+    # At B=2: extra_search (0.690) / extra_search_online (0.675) beats recovered_neighbor (0.620) and push_vectors (0.600) -> FAIL
+    # At B=4: recovered_neighbor (0.680) beats extra_search (0.620), extra_search_online (0.605), and push_vectors (0.600) -> PASS
+    # At B=8: recovered_neighbor (0.740) beats extra_search (0.660), extra_search_online (0.645), and push_vectors (0.630) -> PASS
     if policy == "extra_search":
         return {2: 0.690, 4: 0.620, 8: 0.660}[b_sum]
+    if policy == "extra_search_online":
+        return {2: 0.675, 4: 0.605, 8: 0.645}[b_sum]
     if policy == "push_vectors":
         return {2: 0.600, 4: 0.600, 8: 0.630}[b_sum]
 
@@ -194,7 +208,7 @@ def _write_synthetic_run(
     budget_bytes = int(b_sum) * 24576
     spent_bytes = 0 if policy in ("never_refresh", "oracle_routing", "all_shards") else budget_bytes * 50
 
-    cfg_dict = {
+    cfg_dict: Dict[str, Any] = {
         "policy": policy,
         "num_shards": int(grid_spec["num_shards"]),
         "c": int(grid_spec["c"]),
@@ -216,6 +230,10 @@ def _write_synthetic_run(
         "exact_local_search": False,
         "charge_setup_to_budget": bool(grid_spec["charge_setup_to_budget"]),
     }
+    if grid_spec.get("active_segments") is not None or grid_spec["placement_mode"] == "time_segment_g":
+        cfg_dict["active_segments"] = int(
+            grid_spec["active_segments"] if grid_spec.get("active_segments") is not None else 8
+        )
 
     summary = {
         **cfg_dict,
@@ -236,7 +254,7 @@ def _write_synthetic_run(
         "total_workload_bytes": 100000,
         "total_summaries_refreshed": 150 if policy in REFRESH_RULES else 0,
         "total_forced_by_cap": 12 if policy in REFRESH_RULES else 0,
-        "total_extra_searches": 500 if policy == "extra_search" else 0,
+        "total_extra_searches": 500 if policy in ("extra_search", "extra_search_online") else 0,
         "total_pushed_vectors": 300 if policy == "push_vectors" else 0,
         "cpu_total_s": 1.25,
         "cpu_ground_truth_s_total": 0.50,
@@ -260,7 +278,7 @@ def _write_synthetic_run(
 
 @pytest.fixture(scope="module")
 def synth_results_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Create a complete synthetic 726-run grid once for the module outside repo/results/main."""
+    """Create a complete synthetic 1,116-run grid (M1=330, M2=330, sens=66, M1_online=30, M3=360) once for the module."""
     root = tmp_path_factory.mktemp("synth_results")
     main_dir = root / "main"
     configs_dir = REPO_ROOT / "configs"
@@ -269,6 +287,8 @@ def synth_results_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
         ("M1", "main_M1.yaml"),
         ("M2", "main_M2.yaml"),
         ("sens", "main_sens.yaml"),
+        ("M1_online", "main_M1_online.yaml"),
+        ("M3", "main_M3.yaml"),
     ]:
         grid_spec = load_expected_grid(configs_dir / yaml_name, exp_label)
         exp_dir = main_dir / exp_label
@@ -554,3 +574,192 @@ def test_config_mismatch_duplicate_and_failed_runs_json_cli(
             shutil.rmtree(bad_cfg_dir)
         if failed_path.exists():
             failed_path.unlink()
+
+
+def test_addendum2_hypotheses_pred_m2_ties_and_lookahead(
+    synth_results_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Verify Addendum 2 tests: PRED_M2_TIES (both non-zero FAIL and exact-tie PASS),
+    GATE_M3, H3b, H2b (with break-even Q), H4b (per-B winners), and LOOKAHEAD intervals."""
+    out_dir = tmp_path / "out_add2"
+    res = analyze_all(results_root=synth_results_root, out_dir=out_dir)
+    summary_md = (out_dir / "SUMMARY.md").read_text(encoding="utf-8")
+
+    # 1. M1_online (30/30) and M3 (360/360) are reported in SUMMARY.md and output CSVs exist
+    assert "30 / 30 complete valid runs" in summary_md
+    assert "360 / 360 complete valid runs" in summary_md
+    assert (out_dir / "m1_online_conditions.csv").exists()
+    assert (out_dir / "m3_conditions.csv").exists()
+    assert (out_dir / "breakeven_q_online.csv").exists()
+    assert (out_dir / "lookahead_comparison.csv").exists()
+
+    df_hyp = res["df_hyp"].set_index("hypothesis")
+
+    # 2. GATE_M3, H3b, H2b, H4b outcomes on synth_results_root
+    assert df_hyp.loc["GATE_M3", "outcome"] == "steady=PASS, new_topic=PASS"
+    assert df_hyp.loc["H3b", "outcome"] == "steady=PASS, new_topic=FAIL"
+    assert df_hyp.loc["H2b", "outcome"] == "steady=PASS, new_topic=PASS"
+
+    h4b_outcome = str(df_hyp.loc["H4b", "outcome"])
+    assert "B=2:FAIL (winner: extra_search_online)" in h4b_outcome
+    assert "B=4:PASS (winner: recovered_neighbor)" in h4b_outcome
+    assert "B=8:PASS (winner: recovered_neighbor)" in h4b_outcome
+
+    # Break-even Q on H2b (extra_search_online vs fixed Q=200 best refresh rule `data_change`)
+    df_be_on = res["df_breakeven_online"]
+    assert set(df_be_on["best_refresh_policy"]) == {"data_change"}
+    steady_be_on = str(df_be_on[df_be_on["stream_mode"] == "steady"]["breakeven_q"].iloc[0])
+    nt_be_on = str(df_be_on[df_be_on["stream_mode"] == "new_topic"]["breakeven_q"].iloc[0])
+    assert steady_be_on == "between Q = 200 and Q = 800 (rule: data_change, picked at Q = 200)"
+    assert (
+        nt_be_on
+        == "no crossing in {50, 200, 800}: extra_search_online ahead at all Q (rule: data_change, picked at Q = 200)"
+    )
+
+    # 3. LOOKAHEAD intervals on M1+M1_online (+1.00 pp) and M3 (+1.50 pp)
+    assert df_hyp.loc["LOOKAHEAD", "outcome"] == "steady=REPORTED, new_topic=REPORTED"
+    df_la = res["df_lookahead"]
+    assert len(df_la) == 12  # 2 streams * (3 Q in M1 + 3 B in M3)
+    m1_la = df_la[df_la["experiment"] == "M1+M1_online"]
+    m3_la = df_la[df_la["experiment"] == "M3"]
+    assert np.allclose(m1_la["recent_diff_mean"].to_numpy(dtype=np.float64), 0.010, atol=1e-4)
+    assert np.allclose(m3_la["recent_diff_mean"].to_numpy(dtype=np.float64), 0.015, atol=1e-4)
+
+    # 4. PRED_M2_TIES: on default synth_results_root where M2 refresh rules differ from always_fresh (0.650),
+    # PRED_M2_TIES is FAIL; when all 5 refresh rules match always_fresh (0.650) per query, PRED_M2_TIES is PASS (0.00 pp).
+    assert df_hyp.loc["PRED_M2_TIES", "outcome"] == "steady=FAIL, new_topic=FAIL"
+    assert res["pred_m2_ties"]["steady"]["max_abs_diff"] > 0.10
+
+    configs_dir = REPO_ROOT / "configs"
+    grid_m2 = load_expected_grid(configs_dir / "main_M2.yaml", "M2")
+    m2_dir = synth_results_root / "main" / "M2"
+    modified_dirs: Dict[Path, Path] = {}
+    try:
+        for (stream, _placement, b_sum, q_val, _cap_mode, pol, seed), rid in grid_m2[
+            "expected_cells"
+        ].items():
+            if pol in REFRESH_RULES and stream == "steady":
+                orig_dir = m2_dir / rid
+                bak_dir = tmp_path / f"bak_tie_{rid}"
+                shutil.move(str(orig_dir), str(bak_dir))
+                modified_dirs[orig_dir] = bak_dir
+                _write_synthetic_run(
+                    run_dir=orig_dir,
+                    run_id=rid,
+                    exp_label="M2",
+                    grid_spec=grid_m2,
+                    stream_mode=stream,
+                    b_sum=b_sum,
+                    q_val=q_val,
+                    policy=pol,
+                    seed=seed,
+                    override_recent_mean=0.650,
+                )
+
+        out_ties = tmp_path / "out_ties"
+        res_ties = analyze_all(results_root=synth_results_root, out_dir=out_ties)
+        df_hyp_ties = res_ties["df_hyp"].set_index("hypothesis")
+        assert df_hyp_ties.loc["PRED_M2_TIES", "outcome"] == "steady=PASS, new_topic=FAIL"
+        assert res_ties["pred_m2_ties"]["steady"]["max_abs_diff"] == 0.0
+        assert "0.00 pp (0.000000" in str(df_hyp_ties.loc["PRED_M2_TIES", "steady_value"])
+    finally:
+        for orig_dir, bak_dir in modified_dirs.items():
+            if orig_dir.exists():
+                shutil.rmtree(orig_dir)
+            shutil.move(str(bak_dir), str(orig_dir))
+
+
+def test_gate_m3_failing_on_one_stream_h3b_not_tested_on_that_stream_only(
+    synth_results_root: Path,
+    tmp_path: Path,
+) -> None:
+    """When GATE_M3 fails on steady and passes on new_topic, H3b is NOT TESTED on steady only."""
+    configs_dir = REPO_ROOT / "configs"
+    grid_m3 = load_expected_grid(configs_dir / "main_M3.yaml", "M3")
+    m3_dir = synth_results_root / "main" / "M3"
+
+    modified_dirs: Dict[Path, Path] = {}
+    try:
+        for seed in grid_m3["seeds"]:
+            af_rid = grid_m3["expected_cells"][
+                ("steady", "time_segment_g", 4, 200, "arithmetic", "always_fresh", seed)
+            ]
+            dc_rid = grid_m3["expected_cells"][
+                ("new_topic", "time_segment_g", 4, 200, "arithmetic", "data_change", seed)
+            ]
+            for rid, stream, pol, new_mean in [
+                (af_rid, "steady", "always_fresh", 0.520),
+                (dc_rid, "new_topic", "data_change", 0.590),
+            ]:
+                orig_dir = m3_dir / rid
+                bak_dir = tmp_path / f"bak_m3_{rid}"
+                shutil.move(str(orig_dir), str(bak_dir))
+                modified_dirs[orig_dir] = bak_dir
+                _write_synthetic_run(
+                    run_dir=orig_dir,
+                    run_id=rid,
+                    exp_label="M3",
+                    grid_spec=grid_m3,
+                    stream_mode=stream,
+                    b_sum=4,
+                    q_val=200,
+                    policy=pol,
+                    seed=seed,
+                    override_recent_mean=new_mean,
+                )
+
+        out_dir = tmp_path / "out_gate_m3_fail"
+        res = analyze_all(results_root=synth_results_root, out_dir=out_dir)
+        df_hyp = res["df_hyp"].set_index("hypothesis")
+        assert df_hyp.loc["GATE_M3", "outcome"] == "steady=FAIL, new_topic=PASS"
+        assert df_hyp.loc["H3b", "steady_value"] == "NOT TESTED (GATE FAILED) / FAIL"
+        assert str(df_hyp.loc["H3b", "new_topic_value"]).startswith("**PASS**")
+        assert df_hyp.loc["H3b", "outcome"] == "steady=NOT TESTED (GATE FAILED) / FAIL, new_topic=PASS"
+    finally:
+        for orig_dir, bak_dir in modified_dirs.items():
+            if orig_dir.exists():
+                shutil.rmtree(orig_dir)
+            shutil.move(str(bak_dir), str(orig_dir))
+
+
+def test_missing_m1_online_or_m3_run_marks_addendum2_tests_incomplete(
+    synth_results_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Missing a run in M1_online or M3 lists it in missing_runs.csv and marks H2b, H4b, LOOKAHEAD INCOMPLETE."""
+    configs_dir = REPO_ROOT / "configs"
+    grid_m1_on = load_expected_grid(configs_dir / "main_M1_online.yaml", "M1_online")
+    grid_m3 = load_expected_grid(configs_dir / "main_M3.yaml", "M3")
+
+    m1_on_rid = grid_m1_on["expected_cells"][
+        ("steady", "nearest_initial", 4, 200, "arithmetic", "extra_search_online", 42)
+    ]
+    m3_rid = grid_m3["expected_cells"][
+        ("new_topic", "time_segment_g", 4, 200, "arithmetic", "extra_search_online", 43)
+    ]
+
+    m1_on_dir = synth_results_root / "main" / "M1_online" / m1_on_rid
+    m3_dir = synth_results_root / "main" / "M3" / m3_rid
+    bak_m1_on = tmp_path / "bak_m1_on"
+    bak_m3 = tmp_path / "bak_m3"
+    shutil.move(str(m1_on_dir), str(bak_m1_on))
+    shutil.move(str(m3_dir), str(bak_m3))
+    try:
+        out_dir = tmp_path / "out_miss_add2"
+        res = analyze_all(results_root=synth_results_root, out_dir=out_dir)
+        df_miss = res["df_missing"]
+        assert m1_on_rid in set(df_miss["run_id"])
+        assert m3_rid in set(df_miss["run_id"])
+
+        df_hyp = res["df_hyp"].set_index("hypothesis")
+        assert str(df_hyp.loc["H2b", "steady_value"]).startswith("INCOMPLETE")
+        assert m1_on_rid in str(df_hyp.loc["H2b", "steady_value"])
+        assert "B=4:INCOMPLETE" in str(df_hyp.loc["H4b", "outcome"])
+        assert m3_rid in str(df_hyp.loc["H4b", "new_topic_value"])
+        assert str(df_hyp.loc["LOOKAHEAD", "steady_value"]).startswith("INCOMPLETE")
+        assert str(df_hyp.loc["LOOKAHEAD", "new_topic_value"]).startswith("INCOMPLETE")
+    finally:
+        shutil.move(str(bak_m1_on), str(m1_on_dir))
+        shutil.move(str(bak_m3), str(m3_dir))
+

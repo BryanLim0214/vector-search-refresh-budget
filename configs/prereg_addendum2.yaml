@@ -1,0 +1,158 @@
+# Pre-Registration Addendum 2 (committed before any M2 result exists and before any M1-online or M3 run)
+experiment: prereg_addendum2
+description: >
+  Pre-registration addendum 2 for "Finding New Passages in Distributed Vector Search",
+  committed after code review (audit/GUARDIAN_C1_technical.md) and prior to any M2 result
+  existing or any M1-online / M3 run starting.
+
+why_this_addendum:
+  1_time_segment_structural_ties: >
+    Under time_segment, only one shard ((e mod S)) gets new vectors per epoch, so every refresh rule
+    prioritizes shards with new vectors first, picks that single active shard at B >= 2 (where k >= 1
+    for all five refresh rules), and matches always_fresh exactly on every query; H3 therefore cannot
+    separate the refresh rules on M2. This was found by code review before any M2 run. M2 still runs
+    as registered and is reported; the predicted ties (PRED_M2_TIES) are stated now, and Experiment M3
+    adds multi-segment placement time_segment_g with G = 8 active shards per epoch.
+  2_extra_search_batch_lookahead: >
+    extra_search picks which queries in an epoch receive an extra shard search after seeing the whole
+    epoch's query batch and sorting all Q queries' score gaps; an online coordinator serving queries
+    one by one cannot see current or future queries before deciding. M1 runs as registered; an online
+    version (extra_search_online) is added in M1-online and M3.
+  3_uncharged_protocol_costs_recorded_without_changing_code:
+    data_change_score_messages: >
+      data_change requires each shard to report its 4-byte scalar score (4 B/shard = 128 B/epoch at
+      S = 32), which is not charged to budget B. Charging 128 B/epoch at B = 4 (98,304 B) would reduce
+      data_change from k = 4 to k = 3 summaries per epoch (floor((98304 - 128) / 24576) = 3), so not
+      charging these 128 B/epoch favours data_change.
+    recovered_neighbor_setup_bytes: >
+      recovered_neighbor broadcasts 64 sample query vectors to all 32 shards at setup (64 * 1,536 * 32
+      = 3,145,728 B total, or 62,915 B/epoch amortized over 50 epochs). These setup bytes are not
+      charged to budget B in main runs (reported separately via budget_bytes_with_amortized_setup),
+      which favours recovered_neighbor.
+
+new_code_options:
+  1_placement_time_segment_g:
+    placement_mode: time_segment_g
+    parameter: "active_segments = G (G = 8 in M3)"
+    definition: >
+      Initial shards are built by S-cluster spherical faiss.Kmeans on the initial passage set (no data
+      movement). In epoch e >= 0, the active shards are {(G * e + j) mod S : j = 0..G-1}. Each insert
+      in epoch e goes to the active shard whose initial center is nearest (highest dot product). No
+      data moves.
+  2_policy_extra_search_online:
+    policy: extra_search_online
+    byte_cost_per_extra_search: 1656
+    definition: >
+      Same byte cost per extra shard search (1,656 B) and same per-epoch budget B as extra_search.
+      Queries arrive one at a time. An arriving query gets one extra shard search (on shard s_(m+1))
+      if its score gap s_(m) - s_(m+1) <= tau_e and budget remains this epoch. tau_e is the n_e-th
+      smallest gap among the PREVIOUS epoch's test queries, where n_e = floor(B_bytes / 1656) is the
+      number of extra searches the budget allows; for epoch 0, tau_0 uses the 64 sample queries' gaps.
+      It never reads a current or future query before that query arrives.
+
+hypotheses_and_decision_rules:
+  bootstrap_protocol: >
+    Same thresholds (5 percentage points = 0.05) and two-stage paired bootstrap protocol over queries
+    within each seed and across the 5 seeds (42, 43, 44, 45, 46) as Pre-Registration Addendum 1.
+  PRED_M2_TIES:
+    experiment: M2
+    placement_mode: time_segment
+    condition: "Q = 200, B in {2, 4, 8}, streams in {steady, new_topic}"
+    metric: "max_{query, seed, B, rule} |recent_recall_at_10(rule) - recent_recall_at_10(always_fresh)|"
+    decision_rule: >
+      Stated before M2 runs: on M2, all five refresh rules (round_robin, data_change,
+      recovered_neighbor, ql, ss) equal always_fresh in recent recall@10 per query (max absolute
+      difference == 0.0 on each stream). Report the maximum absolute per-query difference per stream.
+  GATE_M3:
+    experiment: M3
+    placement_mode: time_segment_g
+    active_segments: 8
+    condition: "Q = 200, B = 4, evaluated separately on steady and new_topic"
+    metric: "recent_recall_at_10(always_fresh) - recent_recall_at_10(never_refresh)"
+    decision_rule: >
+      PASS on a stream if mean (always_fresh - never_refresh) recent recall@10 >= 5 percentage points
+      (>= 0.05) at B = 4 on that stream. H3b is tested only on streams where GATE_M3 passes.
+  H3b:
+    experiment: M3
+    placement_mode: time_segment_g
+    active_segments: 8
+    condition: "Q = 200, B = 4, tested only on streams where GATE_M3 passes"
+    decision_rule: >
+      PASS on a gated stream if recovered_neighbor beats each of round_robin, data_change, ql, and ss
+      by >= 5 percentage points (>= 0.05) in mean recent recall@10 at B = 4, with the 95% paired
+      bootstrap interval of each gap strictly above zero. Evaluated per stream; if GATE_M3 fails on a
+      stream, H3b is recorded as NOT TESTED (GATE FAILED) / FAIL on that stream.
+  H2b:
+    experiment: "M1 + M1_online"
+    placement_mode: nearest_initial
+    condition: "B = 4, Q = 200 (and break-even across Q in {50, 200, 800}), streams in {steady, new_topic}"
+    decision_rule: >
+      H2 rerun with extra_search_online in place of extra_search: PASS on a stream if both
+      extra_search_online and push_vectors beat the best refresh rule (highest mean recent_recall_at_10
+      among round_robin, data_change, recovered_neighbor, ql, ss on M1) at equal bytes at Q = 200, B = 4
+      (mean gap > 0 with 95% paired bootstrap interval above zero), per stream. Also report the
+      break-even Q between the fixed Q = 200 best refresh rule and extra_search_online across
+      Q in {50, 200, 800}.
+  H4b:
+    experiment: M3
+    placement_mode: time_segment_g
+    active_segments: 8
+    condition: "Q = 200, B in {2, 4, 8}, streams in {steady, new_topic}"
+    decision_rule: >
+      On M3, equal-byte comparison of the best refresh rule vs extra_search_online vs push_vectors at
+      each B in {2, 4, 8} per stream: PASS for refresh at a given B if the best refresh rule beats both
+      extra_search_online and push_vectors (95% paired bootstrap interval above zero), otherwise FAIL
+      and report the winning method at each B.
+  LOOKAHEAD:
+    experiment: "M1 + M1_online and M3"
+    condition: "M1 + M1_online (nearest_initial, B = 4, Q in {50, 200, 800}) and M3 (time_segment_g, G = 8, Q = 200, B in {2, 4, 8}), per stream"
+    metric: "recent_recall_at_10(extra_search) - recent_recall_at_10(extra_search_online)"
+    decision_rule: >
+      Report the batch look-ahead gap (extra_search minus extra_search_online) on M1 (across Q in
+      {50, 200, 800} at B = 4) and on M3 (across B in {2, 4, 8} at Q = 200) per stream with 95% paired
+      bootstrap intervals.
+
+addendum2_experiments:
+  seeds: [42, 43, 44, 45, 46]
+  M1_online:
+    config: "configs/main_M1_online.yaml"
+    output_dir: "results/main/M1_online"
+    placement_mode: nearest_initial
+    stream_modes: [steady, new_topic]
+    budget_summaries: [4]
+    queries_per_epoch: [50, 200, 800]
+    num_shards: 32
+    m: 2
+    c: 16
+    recent_window_w: 2
+    starvation_cap: arithmetic
+    seeds: [42, 43, 44, 45, 46]
+    methods:
+      - extra_search_online
+  M3:
+    config: "configs/main_M3.yaml"
+    output_dir: "results/main/M3"
+    placement_mode: time_segment_g
+    active_segments: 8
+    stream_modes: [steady, new_topic]
+    budget_summaries: [2, 4, 8]
+    queries_per_epoch: [200]
+    num_shards: 32
+    m: 2
+    c: 16
+    recent_window_w: 2
+    starvation_cap: arithmetic
+    seeds: [42, 43, 44, 45, 46]
+    methods:
+      - never_refresh
+      - always_fresh
+      - oracle_routing
+      - all_shards
+      - round_robin
+      - data_change
+      - recovered_neighbor
+      - ql
+      - ss
+      - extra_search
+      - extra_search_online
+      - push_vectors

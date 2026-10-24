@@ -1,14 +1,18 @@
-"""Analysis script for main experiments M1, M2, and sensitivity (Step 4).
+"""Analysis script for main experiments M1, M2, sens, M1_online, and M3 (Step 4 + Addendum 2).
 
 Reads all run outputs under:
 - `<results_root>/main/M1` (or `<results_root>/M1`)
 - `<results_root>/main/M2` (or `<results_root>/M2`)
 - `<results_root>/main/sens` (or `<results_root>/sens`)
+- `<results_root>/main/M1_online` (or `<results_root>/M1_online`)
+- `<results_root>/main/M3` (or `<results_root>/M3`)
 
 Validates found runs against the pre-registered grid in:
-- `repo/configs/main_M1.yaml`
-- `repo/configs/main_M2.yaml`
-- `repo/configs/main_sens.yaml`
+- `configs/main_M1.yaml`
+- `configs/main_M2.yaml`
+- `configs/main_sens.yaml`
+- `configs/main_M1_online.yaml`
+- `configs/main_M3.yaml`
 
 Produces in `<out_dir>` (defaults to `<results_root>/main`):
 - `SUMMARY.md`
@@ -16,13 +20,27 @@ Produces in `<out_dir>` (defaults to `<results_root>/main`):
 - `m1_conditions.csv`
 - `m2_conditions.csv`
 - `sens_conditions.csv`
+- `m1_online_conditions.csv`
+- `m3_conditions.csv`
 - `hypothesis_tests.csv`
 - `paired_comparisons.csv`
 - `breakeven_q.csv`
+- `breakeven_q_online.csv`
+- `lookahead_comparison.csv`
 - `spearman_comparison.csv`
 """
 
 from __future__ import annotations
+
+import os
+
+for _blas_env_var in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(_blas_env_var, "1")
 
 import argparse
 import json
@@ -34,7 +52,7 @@ import pandas as pd
 import yaml
 
 REFRESH_RULES = ["round_robin", "data_change", "recovered_neighbor", "ql", "ss"]
-ALTERNATIVES = ["extra_search", "push_vectors"]
+ALTERNATIVES = ["extra_search", "extra_search_online", "push_vectors"]
 REFERENCES = ["never_refresh", "always_fresh", "oracle_routing", "all_shards"]
 POLICY_ORDER = REFERENCES + REFRESH_RULES + ALTERNATIVES
 
@@ -126,6 +144,10 @@ def load_expected_grid(config_path: Path, exp_label: str) -> Dict[str, Any]:
     inserts_per_epoch = int(cfg["inserts_per_epoch"])
     recent_window_w = int(cfg["recent_window_w"])
     placement_mode = str(cfg["placement_mode"])
+    raw_active_segments = cfg.get("active_segments", None)
+    active_segments: Optional[int] = (
+        int(raw_active_segments) if raw_active_segments is not None else None
+    )
     bursts = bool(cfg["bursts"])
     sharding_mode = str(cfg["sharding_mode"])
     charge_setup_to_budget = bool(cfg["charge_setup_to_budget"])
@@ -191,6 +213,7 @@ def load_expected_grid(config_path: Path, exp_label: str) -> Dict[str, Any]:
         "inserts_per_epoch": inserts_per_epoch,
         "recent_window_w": recent_window_w,
         "placement_mode": placement_mode,
+        "active_segments": active_segments,
         "bursts": bursts,
         "sharding_mode": sharding_mode,
         "charge_setup_to_budget": charge_setup_to_budget,
@@ -358,6 +381,13 @@ def _validate_run_against_grid(
         fixed_checks.append(
             ("starvation_cap_epochs", int(summary["starvation_cap_epochs"]), int(grid_spec["fixed_cap_epochs"]))
         )
+    if grid_spec.get("active_segments") is not None:
+        if "active_segments" not in summary:
+            mismatches.append("summary missing key 'active_segments'")
+        else:
+            fixed_checks.append(
+                ("active_segments", int(summary["active_segments"]), int(grid_spec["active_segments"]))
+            )
 
     for field_name, actual_val, expected_val in fixed_checks:
         if actual_val != expected_val:
@@ -395,6 +425,7 @@ def _validate_run_against_grid(
             "recent_window_w",
             "stream_mode",
             "placement_mode",
+            "active_segments",
             "bursts",
             "sharding_mode",
             "aging_mode",
@@ -1234,6 +1265,8 @@ def analyze_all(
     configs_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     base_dir, m1_dir, m2_dir, sens_dir = _resolve_experiment_dirs(results_root)
+    m1_online_dir = base_dir / "M1_online"
+    m3_dir = base_dir / "M3"
     if out_dir is None:
         out_dir = base_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1244,16 +1277,28 @@ def analyze_all(
     grid_m1 = load_expected_grid(configs_dir / "main_M1.yaml", "M1")
     grid_m2 = load_expected_grid(configs_dir / "main_M2.yaml", "M2")
     grid_sens = load_expected_grid(configs_dir / "main_sens.yaml", "sens")
+    grid_m1_online = load_expected_grid(configs_dir / "main_M1_online.yaml", "M1_online")
+    grid_m3 = load_expected_grid(configs_dir / "main_M3.yaml", "M3")
 
     scan_m1 = scan_experiment_runs(m1_dir, grid_m1)
     scan_m2 = scan_experiment_runs(m2_dir, grid_m2)
     scan_sens = scan_experiment_runs(sens_dir, grid_sens)
+    scan_m1_online = scan_experiment_runs(m1_online_dir, grid_m1_online)
+    scan_m3 = scan_experiment_runs(m3_dir, grid_m3)
 
     m1_runs = scan_m1["valid_runs"]
     m2_runs = scan_m2["valid_runs"]
     sens_runs = scan_sens["valid_runs"]
+    m1_online_runs = scan_m1_online["valid_runs"]
+    m3_runs = scan_m3["valid_runs"]
 
-    all_issues = scan_m1["issues"] + scan_m2["issues"] + scan_sens["issues"]
+    all_issues = (
+        scan_m1["issues"]
+        + scan_m2["issues"]
+        + scan_sens["issues"]
+        + scan_m1_online["issues"]
+        + scan_m3["issues"]
+    )
     df_missing = pd.DataFrame(
         [
             {
@@ -1271,24 +1316,53 @@ def analyze_all(
     df_m1 = build_condition_table(m1_runs, "M1", expected_seeds=grid_m1["seeds"])
     df_m2 = build_condition_table(m2_runs, "M2", expected_seeds=grid_m2["seeds"])
     df_sens = build_condition_table(sens_runs, "sens", expected_seeds=grid_sens["seeds"])
+    df_m1_online = build_condition_table(m1_online_runs, "M1_online", expected_seeds=grid_m1_online["seeds"])
+    df_m3 = build_condition_table(m3_runs, "M3", expected_seeds=grid_m3["seeds"])
 
     df_m1.to_csv(out_dir / "m1_conditions.csv", index=False)
     df_m2.to_csv(out_dir / "m2_conditions.csv", index=False)
     df_sens.to_csv(out_dir / "sens_conditions.csv", index=False)
+    df_m1_online.to_csv(out_dir / "m1_online_conditions.csv", index=False)
+    df_m3.to_csv(out_dir / "m3_conditions.csv", index=False)
 
     idx_m1 = index_runs_by_condition(m1_runs)
     idx_m2 = index_runs_by_condition(m2_runs)
     idx_sens = index_runs_by_condition(sens_runs)
+    idx_m1_online = index_runs_by_condition(m1_online_runs)
+    idx_m3 = index_runs_by_condition(m3_runs)
+    idx_m1_combined = {**idx_m1, **idx_m1_online}
+
+    scan_m1_combined = {
+        "experiment": "M1+M1_online",
+        "grid_spec": {
+            **grid_m1,
+            "expected_cells": {
+                **grid_m1["expected_cells"],
+                **grid_m1_online["expected_cells"],
+            },
+        },
+        "valid_by_cell": {
+            **scan_m1["valid_by_cell"],
+            **scan_m1_online["valid_by_cell"],
+        },
+        "cell_issues": {
+            **scan_m1["cell_issues"],
+            **scan_m1_online["cell_issues"],
+        },
+    }
 
     paired_rows: List[Dict[str, Any]] = []
     hypothesis_rows: List[Dict[str, Any]] = []
     breakeven_rows: List[Dict[str, Any]] = []
+    breakeven_online_rows: List[Dict[str, Any]] = []
+    lookahead_rows: List[Dict[str, Any]] = []
     selection_notes: List[str] = []
     failed_hypothesis_items: List[str] = []
     incomplete_hypothesis_items: List[str] = []
 
     m1_seeds = grid_m1["seeds"]
     m2_seeds = grid_m2["seeds"]
+    m3_seeds = grid_m3["seeds"]
 
     # --- H1 (M1, nearest_initial, Q=200, B=4): always_fresh - never_refresh < 0.05 on steady and new_topic ---
     h1_stream_outcomes: Dict[str, Dict[str, Any]] = {}
@@ -1975,17 +2049,865 @@ def analyze_all(
         }
     )
 
+    # =========================================================================
+    # Pre-Registration Addendum 2 Tests (`configs/prereg_addendum2.yaml`)
+    # =========================================================================
+
+    # --- PRED_M2_TIES (M2, time_segment, Q=200, B in {2, 4, 8}):
+    # All five refresh rules equal always_fresh in recent recall@10 per query (report max absolute difference) ---
+    pred_m2_ties_outcomes: Dict[str, Dict[str, Any]] = {}
+    pred_m2_ties_disp: Dict[str, str] = {}
+    for stream in ("steady", "new_topic"):
+        ties_missing: List[str] = []
+        for b_sum in (2, 4, 8):
+            b_ok, b_miss = check_condition_complete(
+                scan_m2,
+                stream,
+                "time_segment",
+                b_sum,
+                200,
+                "arithmetic",
+                ["always_fresh"] + REFRESH_RULES,
+            )
+            if not b_ok:
+                ties_missing.extend(b_miss)
+
+        if ties_missing:
+            inc_str = format_incomplete_status(ties_missing)
+            pred_m2_ties_outcomes[stream] = {
+                "complete": False,
+                "status": inc_str,
+                "max_abs_diff": float("nan"),
+                "max_abs_diff_by_b": {},
+                "pass": False,
+            }
+            pred_m2_ties_disp[stream] = inc_str
+            incomplete_hypothesis_items.append(f"- **PRED_M2_TIES ({stream})**: **{inc_str}**")
+            continue
+
+        max_abs_diff_stream = 0.0
+        max_abs_by_b: Dict[int, float] = {}
+        max_abs_by_pol: Dict[str, float] = {pol: 0.0 for pol in REFRESH_RULES}
+        for b_sum in (2, 4, 8):
+            max_b = 0.0
+            af_runs = idx_m2[(stream, "time_segment", b_sum, 200, "arithmetic", "always_fresh")]
+            for ref_pol in REFRESH_RULES:
+                comp_tie = compare_pair(
+                    idx_m2,
+                    stream,
+                    "time_segment",
+                    b_sum,
+                    200,
+                    "arithmetic",
+                    ref_pol,
+                    "always_fresh",
+                    expected_seeds=m2_seeds,
+                    scan_res=scan_m2,
+                )
+                comp_tie["experiment"] = "M2"
+                comp_tie["comparison_type"] = f"PRED_M2_TIES_B{b_sum}"
+
+                pol_runs = idx_m2[(stream, "time_segment", b_sum, 200, "arithmetic", ref_pol)]
+                pol_b_max = 0.0
+                for seed in m2_seeds:
+                    arr_af = np.asarray(af_runs[seed]["q_recent"], dtype=np.float64)
+                    arr_pol = np.asarray(pol_runs[seed]["q_recent"], dtype=np.float64)
+                    if arr_af.shape != arr_pol.shape or not np.array_equal(np.isnan(arr_af), np.isnan(arr_pol)):
+                        pol_b_max = float("inf")
+                    else:
+                        valid_mask = ~np.isnan(arr_af)
+                        if np.any(valid_mask):
+                            d_max = float(np.max(np.abs(arr_pol[valid_mask] - arr_af[valid_mask])))
+                            pol_b_max = max(pol_b_max, d_max)
+                comp_tie["max_abs_query_diff"] = pol_b_max
+                paired_rows.append(comp_tie)
+                max_b = max(max_b, pol_b_max)
+                max_abs_by_pol[ref_pol] = max(max_abs_by_pol[ref_pol], pol_b_max)
+            max_abs_by_b[b_sum] = max_b
+            max_abs_diff_stream = max(max_abs_diff_stream, max_b)
+
+        tie_pass = bool(max_abs_diff_stream == 0.0)
+        tie_status = "PASS" if tie_pass else "FAIL"
+        b_breakdown = ", ".join(f"B={b}:{max_abs_by_b[b] * 100.0:.2f} pp" for b in (2, 4, 8))
+        val_str = (
+            f"max |recent_recall@10(rule) - recent_recall@10(always_fresh)| = "
+            f"{max_abs_diff_stream * 100.0:.2f} pp ({max_abs_diff_stream:.6f}; {b_breakdown}) "
+            f"**[{tie_status}]**"
+        )
+        pred_m2_ties_disp[stream] = val_str
+        if not tie_pass:
+            failed_hypothesis_items.append(f"- **PRED_M2_TIES ({stream})**: **FAIL** ({val_str})")
+        pred_m2_ties_outcomes[stream] = {
+            "complete": True,
+            "status": tie_status,
+            "max_abs_diff": max_abs_diff_stream,
+            "max_abs_diff_by_b": max_abs_by_b,
+            "max_abs_diff_by_policy": max_abs_by_pol,
+            "pass": tie_pass,
+        }
+
+    pred_m2_ties_outcome_str = (
+        f"steady={pred_m2_ties_outcomes['steady']['status']}, "
+        f"new_topic={pred_m2_ties_outcomes['new_topic']['status']}"
+    )
+    hypothesis_rows.append(
+        {
+            "hypothesis": "PRED_M2_TIES",
+            "experiment": "M2 (time_segment, Q=200, B in {2, 4, 8})",
+            "rule": "All 5 refresh rules equal always_fresh in recent recall@10 per query (max_abs_diff == 0.0)",
+            "steady_value": pred_m2_ties_disp["steady"],
+            "new_topic_value": pred_m2_ties_disp["new_topic"],
+            "outcome": pred_m2_ties_outcome_str,
+        }
+    )
+
+    # --- GATE_M3 (M3, time_segment_g, G=8, Q=200, B=4): always_fresh - never_refresh >= 0.05 per stream ---
+    gate_m3_outcomes: Dict[str, Dict[str, Any]] = {}
+    gate_m3_disp: Dict[str, str] = {}
+    for stream in ("steady", "new_topic"):
+        comp = compare_pair(
+            idx_m3,
+            stream,
+            "time_segment_g",
+            4,
+            200,
+            "arithmetic",
+            "always_fresh",
+            "never_refresh",
+            expected_seeds=m3_seeds,
+            scan_res=scan_m3,
+        )
+        comp["experiment"] = "M3"
+        comp["comparison_type"] = "GATE_M3"
+        paired_rows.append(comp)
+        if not comp["complete"]:
+            comp["gate_pass"] = False
+            comp["gate_status"] = comp["status"]
+            gate_m3_disp[stream] = comp["status"]
+            incomplete_hypothesis_items.append(f"- **GATE_M3 ({stream})**: **{comp['status']}**")
+        else:
+            gate_pass = bool(comp["recent_diff_mean"] >= 0.05)
+            comp["gate_pass"] = gate_pass
+            comp["gate_status"] = "PASS" if gate_pass else "FAIL"
+            val_str = (
+                f"{fmt_diff_pts(comp['recent_diff_mean'], comp['recent_diff_ci95_low'], comp['recent_diff_ci95_high'])} "
+                f"(bytes: AF={comp['budget_bytes_a_mean']:,.0f}, NR={comp['budget_bytes_b_mean']:,.0f}) "
+                f"**[{comp['gate_status']}]**"
+            )
+            gate_m3_disp[stream] = val_str
+            if not gate_pass:
+                failed_hypothesis_items.append(f"- **GATE_M3 ({stream})**: **FAIL** ({val_str})")
+        gate_m3_outcomes[stream] = comp
+
+    gate_m3_outcome_str = (
+        f"steady={gate_m3_outcomes['steady']['gate_status']}, "
+        f"new_topic={gate_m3_outcomes['new_topic']['gate_status']}"
+    )
+    hypothesis_rows.append(
+        {
+            "hypothesis": "GATE_M3",
+            "experiment": "M3 (time_segment_g, G=8, Q=200, B=4)",
+            "rule": "always_fresh - never_refresh recent recall@10 >= 5.0 pp (evaluated per stream)",
+            "steady_value": gate_m3_disp["steady"],
+            "new_topic_value": gate_m3_disp["new_topic"],
+            "outcome": gate_m3_outcome_str,
+        }
+    )
+
+    # --- H3b (M3, time_segment_g, G=8, B=4, Q=200, tested only on streams where GATE_M3 passes):
+    # recovered_neighbor beats round_robin, data_change, ql, ss by >= 5 points (95% CI > 0) ---
+    h3b_stream_details: Dict[str, Dict[str, Any]] = {}
+    for stream in ("steady", "new_topic"):
+        comps_vs_rn: Dict[str, Dict[str, Any]] = {}
+        for other_rule in ("round_robin", "data_change", "ql", "ss"):
+            comp = compare_pair(
+                idx_m3,
+                stream,
+                "time_segment_g",
+                4,
+                200,
+                "arithmetic",
+                "recovered_neighbor",
+                other_rule,
+                expected_seeds=m3_seeds,
+                scan_res=scan_m3,
+            )
+            comp["experiment"] = "M3"
+            comp["comparison_type"] = "H3b_rn_vs_refresh_rules_B4"
+            paired_rows.append(comp)
+            comps_vs_rn[other_rule] = comp
+
+        gate_comp = gate_m3_outcomes[stream]
+        h3b_ok, h3b_missing = check_condition_complete(
+            scan_m3, stream, "time_segment_g", 4, 200, "arithmetic", REFRESH_RULES
+        )
+        if not gate_comp["complete"]:
+            stream_h3b_pass = False
+            h3b_status = gate_comp["status"]
+            status_str = h3b_status
+            incomplete_hypothesis_items.append(f"- **H3b ({stream})**: **{h3b_status}**")
+        elif not gate_comp["gate_pass"]:
+            stream_h3b_pass = False
+            h3b_status = "NOT TESTED (GATE FAILED) / FAIL"
+            status_str = "NOT TESTED (GATE FAILED) / FAIL"
+            failed_hypothesis_items.append(
+                f"- **H3b ({stream})**: **NOT TESTED (GATE FAILED) / FAIL** (GATE_M3 failed on `{stream}`)"
+            )
+        elif not h3b_ok:
+            stream_h3b_pass = False
+            h3b_status = format_incomplete_status(h3b_missing)
+            status_str = h3b_status
+            incomplete_hypothesis_items.append(f"- **H3b ({stream})**: **{h3b_status}**")
+        else:
+            stream_h3b_pass = all(
+                c["recent_diff_mean"] >= 0.05 and c["recent_diff_ci95_low"] > 0.0
+                for c in comps_vs_rn.values()
+            )
+            h3b_status = "PASS" if stream_h3b_pass else "FAIL"
+            min_other = min(comps_vs_rn.keys(), key=lambda k: comps_vs_rn[k]["recent_diff_mean"])
+            mc = comps_vs_rn[min_other]
+            status_str = (
+                f"**{h3b_status}** (min gap vs `{min_other}`: "
+                f"{fmt_diff_pts(mc['recent_diff_mean'], mc['recent_diff_ci95_low'], mc['recent_diff_ci95_high'])}; "
+                f"bytes: RN={mc['budget_bytes_a_mean']:,.0f}, {min_other}={mc['budget_bytes_b_mean']:,.0f})"
+            )
+            if not stream_h3b_pass:
+                failed_hypothesis_items.append(f"- **H3b ({stream})**: **FAIL** ({status_str})")
+
+        h3b_stream_details[stream] = {
+            "gate_complete": gate_comp["complete"],
+            "gate_passed": gate_comp["gate_pass"],
+            "complete": gate_comp["complete"] and (not gate_comp["gate_pass"] or h3b_ok),
+            "pass": stream_h3b_pass,
+            "status": h3b_status,
+            "status_str": status_str,
+            "comparisons": comps_vs_rn,
+        }
+
+    h3b_outcome_str = (
+        f"steady={h3b_stream_details['steady']['status']}, "
+        f"new_topic={h3b_stream_details['new_topic']['status']}"
+    )
+    hypothesis_rows.append(
+        {
+            "hypothesis": "H3b",
+            "experiment": "M3 (time_segment_g, G=8, Q=200, B=4)",
+            "rule": "If GATE_M3 passes on stream: recovered_neighbor beats round_robin, data_change, ql, ss by >= 5.0 pp (95% CI > 0)",
+            "steady_value": h3b_stream_details["steady"]["status_str"],
+            "new_topic_value": h3b_stream_details["new_topic"]["status_str"],
+            "outcome": h3b_outcome_str,
+        }
+    )
+
+    # --- H2b (M1 + M1_online, nearest_initial): extra_search_online and push_vectors beat best refresh rule at Q=200, B=4; break-even Q ---
+    h2b_checks: Dict[str, Dict[str, Any]] = {}
+    h2b_stream_disp: Dict[str, str] = {}
+    for stream in ("steady", "new_topic"):
+        q200_ok, q200_missing = check_condition_complete(
+            scan_m1_combined,
+            stream,
+            "nearest_initial",
+            4,
+            200,
+            "arithmetic",
+            REFRESH_RULES + ["extra_search_online", "push_vectors"],
+        )
+        if not q200_ok:
+            inc_str = format_incomplete_status(q200_missing)
+            h2b_checks[stream] = {
+                "complete": False,
+                "status": inc_str,
+                "best_refresh": None,
+                "selection_note": f"H2b ({stream}, Q=200, B=4): {inc_str}",
+                "eso_vs_best": None,
+                "pv_vs_best": None,
+                "pass": False,
+                "breakeven_q": inc_str,
+            }
+            selection_notes.append(f"H2b (`{stream}`, Q=200, B=4): {inc_str}")
+            incomplete_hypothesis_items.append(f"- **H2b ({stream})**: **{inc_str}**")
+            h2b_stream_disp[stream] = inc_str
+            breakeven_online_rows.append(
+                {
+                    "stream_mode": stream,
+                    "queries_per_epoch": 200,
+                    "status": inc_str,
+                    "best_refresh_policy": "INCOMPLETE",
+                    "second_best_refresh_policy": "INCOMPLETE",
+                    "gap_to_second_best_pp": float("nan"),
+                    "best_refresh_recent_recall": float("nan"),
+                    "extra_search_online_recent_recall": float("nan"),
+                    "push_vectors_recent_recall": float("nan"),
+                    "refresh_minus_extra_search_online_mean": float("nan"),
+                    "refresh_minus_extra_search_online_ci95_low": float("nan"),
+                    "refresh_minus_extra_search_online_ci95_high": float("nan"),
+                    "refresh_minus_push_vectors_mean": float("nan"),
+                    "refresh_minus_push_vectors_ci95_low": float("nan"),
+                    "refresh_minus_push_vectors_ci95_high": float("nan"),
+                    "breakeven_q": inc_str,
+                }
+            )
+            continue
+
+        sel_q200 = select_best_refresh_rule(df_m1, stream, "nearest_initial", 4, 200, "arithmetic")
+        best_refresh_pol = sel_q200["best_policy"]
+        selection_notes.append(f"H2b (`{stream}`, Q=200, B=4): {sel_q200['selection_note']}")
+
+        eso_vs_best: Optional[Dict[str, Any]] = None
+        pv_vs_best_b: Optional[Dict[str, Any]] = None
+        for ref_pol in REFRESH_RULES:
+            c_eso = compare_pair(
+                idx_m1_combined,
+                stream,
+                "nearest_initial",
+                4,
+                200,
+                "arithmetic",
+                "extra_search_online",
+                ref_pol,
+                expected_seeds=m1_seeds,
+                scan_res=scan_m1_combined,
+            )
+            c_eso["experiment"] = "M1+M1_online"
+            c_eso["comparison_type"] = (
+                "H2b_extra_search_online_vs_best_refresh_Q200"
+                if ref_pol == best_refresh_pol
+                else "H2b_extra_search_online_vs_refresh_Q200"
+            )
+            paired_rows.append(c_eso)
+            if ref_pol == best_refresh_pol:
+                eso_vs_best = c_eso
+
+            c_pv = compare_pair(
+                idx_m1_combined,
+                stream,
+                "nearest_initial",
+                4,
+                200,
+                "arithmetic",
+                "push_vectors",
+                ref_pol,
+                expected_seeds=m1_seeds,
+                scan_res=scan_m1_combined,
+            )
+            c_pv["experiment"] = "M1+M1_online"
+            c_pv["comparison_type"] = (
+                "H2b_push_vectors_vs_best_refresh_Q200"
+                if ref_pol == best_refresh_pol
+                else "H2b_push_vectors_vs_refresh_Q200"
+            )
+            paired_rows.append(c_pv)
+            if ref_pol == best_refresh_pol:
+                pv_vs_best_b = c_pv
+
+        assert eso_vs_best is not None and pv_vs_best_b is not None
+        stream_pass = bool(
+            eso_vs_best["recent_diff_mean"] > 0.0
+            and eso_vs_best["recent_diff_ci95_low"] > 0.0
+            and pv_vs_best_b["recent_diff_mean"] > 0.0
+            and pv_vs_best_b["recent_diff_ci95_low"] > 0.0
+        )
+        stream_status = "PASS" if stream_pass else "FAIL"
+
+        # Break-even Q sweep across Q in {50, 200, 800} using the FIXED Q=200 best refresh rule `best_refresh_pol`
+        q_gaps: List[Tuple[int, float]] = []
+        sweep_missing: List[str] = []
+        stream_be_rows: List[Dict[str, Any]] = []
+        for q_val in (50, 200, 800):
+            q_ok, q_miss = check_condition_complete(
+                scan_m1_combined,
+                stream,
+                "nearest_initial",
+                4,
+                q_val,
+                "arithmetic",
+                [best_refresh_pol, "extra_search_online", "push_vectors"],
+            )
+            if not q_ok:
+                sweep_missing.extend(q_miss)
+                stream_be_rows.append(
+                    {
+                        "stream_mode": stream,
+                        "queries_per_epoch": q_val,
+                        "status": format_incomplete_status(q_miss),
+                        "best_refresh_policy": best_refresh_pol,
+                        "second_best_refresh_policy": sel_q200["second_policy"],
+                        "gap_to_second_best_pp": sel_q200["gap_to_second_pp"],
+                        "best_refresh_recent_recall": float("nan"),
+                        "extra_search_online_recent_recall": float("nan"),
+                        "push_vectors_recent_recall": float("nan"),
+                        "refresh_minus_extra_search_online_mean": float("nan"),
+                        "refresh_minus_extra_search_online_ci95_low": float("nan"),
+                        "refresh_minus_extra_search_online_ci95_high": float("nan"),
+                        "refresh_minus_push_vectors_mean": float("nan"),
+                        "refresh_minus_push_vectors_ci95_low": float("nan"),
+                        "refresh_minus_push_vectors_ci95_high": float("nan"),
+                    }
+                )
+                continue
+
+            ref_vs_eso = compare_pair(
+                idx_m1_combined,
+                stream,
+                "nearest_initial",
+                4,
+                q_val,
+                "arithmetic",
+                best_refresh_pol,
+                "extra_search_online",
+                expected_seeds=m1_seeds,
+                scan_res=scan_m1_combined,
+            )
+            ref_vs_eso["experiment"] = "M1+M1_online"
+            ref_vs_eso["comparison_type"] = f"H2b_Q_sweep_Q{q_val}"
+            paired_rows.append(ref_vs_eso)
+
+            ref_vs_pv = compare_pair(
+                idx_m1_combined,
+                stream,
+                "nearest_initial",
+                4,
+                q_val,
+                "arithmetic",
+                best_refresh_pol,
+                "push_vectors",
+                expected_seeds=m1_seeds,
+                scan_res=scan_m1_combined,
+            )
+            ref_vs_pv["experiment"] = "M1+M1_online"
+            ref_vs_pv["comparison_type"] = f"H2b_Q_sweep_vs_push_Q{q_val}"
+            paired_rows.append(ref_vs_pv)
+
+            sub_cell_m1 = df_m1[
+                (df_m1["stream_mode"] == stream)
+                & (df_m1["placement_mode"] == "nearest_initial")
+                & (df_m1["budget_summaries"] == 4)
+                & (df_m1["queries_per_epoch"] == q_val)
+                & (df_m1["starvation_cap_mode"] == "arithmetic")
+            ]
+            sub_cell_m1_on = df_m1_online[
+                (df_m1_online["stream_mode"] == stream)
+                & (df_m1_online["placement_mode"] == "nearest_initial")
+                & (df_m1_online["budget_summaries"] == 4)
+                & (df_m1_online["queries_per_epoch"] == q_val)
+                & (df_m1_online["starvation_cap_mode"] == "arithmetic")
+            ]
+            ref_rec = float(sub_cell_m1[sub_cell_m1["policy"] == best_refresh_pol]["recent_recall_at_10_mean"].iloc[0])
+            eso_rec = float(sub_cell_m1_on[sub_cell_m1_on["policy"] == "extra_search_online"]["recent_recall_at_10_mean"].iloc[0])
+            pv_rec = float(sub_cell_m1[sub_cell_m1["policy"] == "push_vectors"]["recent_recall_at_10_mean"].iloc[0])
+
+            q_gaps.append((q_val, float(ref_vs_eso["recent_diff_mean"])))
+            stream_be_rows.append(
+                {
+                    "stream_mode": stream,
+                    "queries_per_epoch": q_val,
+                    "status": "COMPLETE",
+                    "best_refresh_policy": best_refresh_pol,
+                    "second_best_refresh_policy": sel_q200["second_policy"],
+                    "gap_to_second_best_pp": sel_q200["gap_to_second_pp"],
+                    "best_refresh_recent_recall": ref_rec,
+                    "extra_search_online_recent_recall": eso_rec,
+                    "push_vectors_recent_recall": pv_rec,
+                    "refresh_minus_extra_search_online_mean": ref_vs_eso["recent_diff_mean"],
+                    "refresh_minus_extra_search_online_ci95_low": ref_vs_eso["recent_diff_ci95_low"],
+                    "refresh_minus_extra_search_online_ci95_high": ref_vs_eso["recent_diff_ci95_high"],
+                    "refresh_minus_push_vectors_mean": ref_vs_pv["recent_diff_mean"],
+                    "refresh_minus_push_vectors_ci95_low": ref_vs_pv["recent_diff_ci95_low"],
+                    "refresh_minus_push_vectors_ci95_high": ref_vs_pv["recent_diff_ci95_high"],
+                }
+            )
+
+        if sweep_missing or len(q_gaps) < 3 or any(not np.isfinite(g) for _, g in q_gaps):
+            breakeven_str = format_incomplete_status(sweep_missing)
+        else:
+            crossings: List[str] = []
+            for (q1, g1), (q2, g2) in zip(q_gaps[:-1], q_gaps[1:]):
+                if (g1 < 0.0 and g2 > 0.0) or (g1 > 0.0 and g2 < 0.0):
+                    crossings.append(f"between Q = {q1} and Q = {q2}")
+                elif g1 == 0.0:
+                    crossings.append(f"at Q = {q1}")
+                elif g2 == 0.0:
+                    crossings.append(f"at Q = {q2}")
+            if crossings:
+                breakeven_str = (
+                    f"{'; '.join(crossings)} "
+                    f"(rule: {best_refresh_pol}, picked at Q = 200)"
+                )
+            elif all(g < 0.0 for _, g in q_gaps):
+                breakeven_str = (
+                    f"no crossing in {{50, 200, 800}}: extra_search_online ahead at all Q "
+                    f"(rule: {best_refresh_pol}, picked at Q = 200)"
+                )
+            else:
+                breakeven_str = (
+                    f"no crossing in {{50, 200, 800}}: {best_refresh_pol} ahead at all Q "
+                    f"(rule: {best_refresh_pol}, picked at Q = 200)"
+                )
+
+        for r_be in stream_be_rows:
+            r_be["breakeven_q"] = breakeven_str
+            breakeven_online_rows.append(r_be)
+
+        h2b_checks[stream] = {
+            "complete": True,
+            "status": stream_status,
+            "best_refresh": best_refresh_pol,
+            "second_refresh": sel_q200["second_policy"],
+            "gap_to_second_pp": sel_q200["gap_to_second_pp"],
+            "selection_note": sel_q200["selection_note"],
+            "eso_vs_best": eso_vs_best,
+            "pv_vs_best": pv_vs_best_b,
+            "pass": stream_pass,
+            "breakeven_q": breakeven_str,
+        }
+
+        disp_str = (
+            f"**{stream_status}** — ESO vs `{best_refresh_pol}` (picked on same data, "
+            f"{sel_q200['gap_to_second_pp']:+.2f} pp vs 2nd `{sel_q200['second_policy']}`): "
+            f"{fmt_diff_pts(eso_vs_best['recent_diff_mean'], eso_vs_best['recent_diff_ci95_low'], eso_vs_best['recent_diff_ci95_high'])}; "
+            f"PV vs `{best_refresh_pol}`: "
+            f"{fmt_diff_pts(pv_vs_best_b['recent_diff_mean'], pv_vs_best_b['recent_diff_ci95_low'], pv_vs_best_b['recent_diff_ci95_high'])} "
+            f"(bytes: ESO={eso_vs_best['budget_bytes_a_mean']:,.0f}, PV={pv_vs_best_b['budget_bytes_a_mean']:,.0f}, "
+            f"{best_refresh_pol}={eso_vs_best['budget_bytes_b_mean']:,.0f}); "
+            f"Break-even: {breakeven_str}"
+        )
+        h2b_stream_disp[stream] = disp_str
+        if not stream_pass:
+            failed_hypothesis_items.append(f"- **H2b ({stream})**: **FAIL** ({disp_str})")
+
+    h2b_outcome_str = f"steady={h2b_checks['steady']['status']}, new_topic={h2b_checks['new_topic']['status']}"
+    hypothesis_rows.append(
+        {
+            "hypothesis": "H2b",
+            "experiment": "M1 + M1_online (nearest_initial, Q=200, B=4 & Q sweep)",
+            "rule": "extra_search_online and push_vectors beat best refresh rule at Q=200 (95% CI > 0) per stream",
+            "steady_value": h2b_stream_disp["steady"],
+            "new_topic_value": h2b_stream_disp["new_topic"],
+            "outcome": h2b_outcome_str,
+        }
+    )
+
+    # --- H4b (M3, time_segment_g, G=8, Q=200, B in {2, 4, 8}): best refresh rule vs extra_search_online vs push_vectors ---
+    h4b_details: Dict[str, List[str]] = {"steady": [], "new_topic": []}
+    h4b_per_b_outcomes: Dict[str, Dict[int, str]] = {"steady": {}, "new_topic": {}}
+    h4b_table_rows: List[Dict[str, Any]] = []
+
+    for stream in ("steady", "new_topic"):
+        for b_sum in (2, 4, 8):
+            b_ok, b_missing = check_condition_complete(
+                scan_m3,
+                stream,
+                "time_segment_g",
+                b_sum,
+                200,
+                "arithmetic",
+                REFRESH_RULES + ["extra_search_online", "push_vectors"],
+            )
+            if not b_ok:
+                inc_str = format_incomplete_status(b_missing)
+                h4b_per_b_outcomes[stream][b_sum] = inc_str
+                h4b_details[stream].append(f"B={b_sum}: {inc_str}")
+                selection_notes.append(f"H4b (`{stream}`, B={b_sum}, Q=200): {inc_str}")
+                incomplete_hypothesis_items.append(f"- **H4b ({stream}, B={b_sum})**: **{inc_str}**")
+                h4b_table_rows.append(
+                    {
+                        "stream_mode": stream,
+                        "budget_summaries": b_sum,
+                        "status": inc_str,
+                        "winner": "INCOMPLETE",
+                        "best_refresh_policy": "INCOMPLETE",
+                        "second_best_refresh_policy": "INCOMPLETE",
+                        "gap_to_second_best_pp": float("nan"),
+                        "ref_vs_eso_str": inc_str,
+                        "ref_vs_pv_str": inc_str,
+                        "eso_vs_pv_str": inc_str,
+                        "bytes_str": "INCOMPLETE",
+                    }
+                )
+                continue
+
+            sel_b = select_best_refresh_rule(df_m3, stream, "time_segment_g", b_sum, 200, "arithmetic")
+            best_ref_b = sel_b["best_policy"]
+            selection_notes.append(f"H4b (`{stream}`, B={b_sum}, Q=200): {sel_b['selection_note']}")
+
+            ref_vs_eso: Optional[Dict[str, Any]] = None
+            ref_vs_pv: Optional[Dict[str, Any]] = None
+            for ref_pol in REFRESH_RULES:
+                c_eso = compare_pair(
+                    idx_m3,
+                    stream,
+                    "time_segment_g",
+                    b_sum,
+                    200,
+                    "arithmetic",
+                    ref_pol,
+                    "extra_search_online",
+                    expected_seeds=m3_seeds,
+                    scan_res=scan_m3,
+                )
+                c_eso["experiment"] = "M3"
+                c_eso["comparison_type"] = (
+                    f"H4b_best_refresh_vs_extra_search_online_B{b_sum}"
+                    if ref_pol == best_ref_b
+                    else f"H4b_refresh_vs_extra_search_online_B{b_sum}"
+                )
+                paired_rows.append(c_eso)
+                if ref_pol == best_ref_b:
+                    ref_vs_eso = c_eso
+
+                c_pv = compare_pair(
+                    idx_m3,
+                    stream,
+                    "time_segment_g",
+                    b_sum,
+                    200,
+                    "arithmetic",
+                    ref_pol,
+                    "push_vectors",
+                    expected_seeds=m3_seeds,
+                    scan_res=scan_m3,
+                )
+                c_pv["experiment"] = "M3"
+                c_pv["comparison_type"] = (
+                    f"H4b_best_refresh_vs_push_vectors_B{b_sum}"
+                    if ref_pol == best_ref_b
+                    else f"H4b_refresh_vs_push_vectors_B{b_sum}"
+                )
+                paired_rows.append(c_pv)
+                if ref_pol == best_ref_b:
+                    ref_vs_pv = c_pv
+
+            eso_vs_pv = compare_pair(
+                idx_m3,
+                stream,
+                "time_segment_g",
+                b_sum,
+                200,
+                "arithmetic",
+                "extra_search_online",
+                "push_vectors",
+                expected_seeds=m3_seeds,
+                scan_res=scan_m3,
+            )
+            eso_vs_pv["experiment"] = "M3"
+            eso_vs_pv["comparison_type"] = f"H4b_extra_search_online_vs_push_vectors_B{b_sum}"
+            paired_rows.append(eso_vs_pv)
+
+            assert ref_vs_eso is not None and ref_vs_pv is not None
+
+            ref_beats_eso = bool(ref_vs_eso["recent_diff_mean"] > 0.0 and ref_vs_eso["recent_diff_ci95_low"] > 0.0)
+            eso_beats_ref = bool(ref_vs_eso["recent_diff_mean"] < 0.0 and ref_vs_eso["recent_diff_ci95_high"] < 0.0)
+            ref_beats_pv = bool(ref_vs_pv["recent_diff_mean"] > 0.0 and ref_vs_pv["recent_diff_ci95_low"] > 0.0)
+            pv_beats_ref = bool(ref_vs_pv["recent_diff_mean"] < 0.0 and ref_vs_pv["recent_diff_ci95_high"] < 0.0)
+            eso_beats_pv = bool(eso_vs_pv["recent_diff_mean"] > 0.0 and eso_vs_pv["recent_diff_ci95_low"] > 0.0)
+            pv_beats_eso = bool(eso_vs_pv["recent_diff_mean"] < 0.0 and eso_vs_pv["recent_diff_ci95_high"] < 0.0)
+
+            beats_both = ref_beats_eso and ref_beats_pv
+            b_status = "PASS" if beats_both else "FAIL"
+
+            if beats_both:
+                winner = best_ref_b
+            elif eso_beats_ref and eso_beats_pv:
+                winner = "extra_search_online"
+            elif pv_beats_ref and pv_beats_eso:
+                winner = "push_vectors"
+            else:
+                sub_three = df_m3[
+                    (df_m3["stream_mode"] == stream)
+                    & (df_m3["placement_mode"] == "time_segment_g")
+                    & (df_m3["budget_summaries"] == b_sum)
+                    & (df_m3["queries_per_epoch"] == 200)
+                    & (df_m3["starvation_cap_mode"] == "arithmetic")
+                    & (df_m3["policy"].isin([best_ref_b, "extra_search_online", "push_vectors"]))
+                ].sort_values("recent_recall_at_10_mean", ascending=False)
+                top_pol = str(sub_three.iloc[0]["policy"])
+                winner = f"no clear winner (highest mean: {top_pol})"
+
+            h4b_per_b_outcomes[stream][b_sum] = f"{b_status} (winner: {winner})"
+
+            ref_vs_eso_str = fmt_diff_pts(
+                ref_vs_eso["recent_diff_mean"],
+                ref_vs_eso["recent_diff_ci95_low"],
+                ref_vs_eso["recent_diff_ci95_high"],
+            )
+            ref_vs_pv_str = fmt_diff_pts(
+                ref_vs_pv["recent_diff_mean"],
+                ref_vs_pv["recent_diff_ci95_low"],
+                ref_vs_pv["recent_diff_ci95_high"],
+            )
+            eso_vs_pv_str = fmt_diff_pts(
+                eso_vs_pv["recent_diff_mean"],
+                eso_vs_pv["recent_diff_ci95_low"],
+                eso_vs_pv["recent_diff_ci95_high"],
+            )
+            bytes_str = (
+                f"{best_ref_b}={ref_vs_eso['budget_bytes_a_mean']:,.0f}, "
+                f"ESO={ref_vs_eso['budget_bytes_b_mean']:,.0f}, "
+                f"PV={ref_vs_pv['budget_bytes_b_mean']:,.0f}"
+            )
+
+            detail_entry = (
+                f"B={b_sum}: **{b_status}** (winner: `{winner}`; "
+                f"`{best_ref_b}` [picked on same data, {sel_b['gap_to_second_pp']:+.2f} pp vs 2nd `{sel_b['second_policy']}`] "
+                f"vs ESO {ref_vs_eso_str}, vs PV {ref_vs_pv_str}, ESO vs PV {eso_vs_pv_str}; bytes: {bytes_str})"
+            )
+            h4b_details[stream].append(detail_entry)
+            if not beats_both:
+                failed_hypothesis_items.append(
+                    f"- **H4b ({stream}, B={b_sum})**: **FAIL** (winner: `{winner}`; "
+                    f"`{best_ref_b}` vs ESO {ref_vs_eso_str}, vs PV {ref_vs_pv_str}, ESO vs PV {eso_vs_pv_str})"
+                )
+
+            h4b_table_rows.append(
+                {
+                    "stream_mode": stream,
+                    "budget_summaries": b_sum,
+                    "status": b_status,
+                    "winner": winner,
+                    "best_refresh_policy": best_ref_b,
+                    "second_best_refresh_policy": sel_b["second_policy"],
+                    "gap_to_second_best_pp": sel_b["gap_to_second_pp"],
+                    "ref_vs_eso_str": ref_vs_eso_str,
+                    "ref_vs_pv_str": ref_vs_pv_str,
+                    "eso_vs_pv_str": eso_vs_pv_str,
+                    "bytes_str": bytes_str,
+                }
+            )
+
+    h4b_outcome_parts: List[str] = []
+    for stream in ("steady", "new_topic"):
+        b_parts = [f"B={b}:{h4b_per_b_outcomes[stream][b]}" for b in (2, 4, 8)]
+        h4b_outcome_parts.append(f"{stream}=[{', '.join(b_parts)}]")
+    h4b_outcome_str = "; ".join(h4b_outcome_parts)
+
+    hypothesis_rows.append(
+        {
+            "hypothesis": "H4b",
+            "experiment": "M3 (time_segment_g, G=8, Q=200, B in {2, 4, 8})",
+            "rule": "Equal-byte comparison of best refresh rule vs extra_search_online vs push_vectors per stream and per B in {2, 4, 8}",
+            "steady_value": "; ".join(h4b_details["steady"]),
+            "new_topic_value": "; ".join(h4b_details["new_topic"]),
+            "outcome": h4b_outcome_str,
+        }
+    )
+
+    # --- LOOKAHEAD (M1 + M1_online at B=4, Q in {50, 200, 800} and M3 at Q=200, B in {2, 4, 8}):
+    # extra_search - extra_search_online reported with 95% paired bootstrap intervals per stream ---
+    lookahead_stream_disp: Dict[str, str] = {}
+    lookahead_stream_status: Dict[str, str] = {}
+    for stream in ("steady", "new_topic"):
+        stream_la_parts: List[str] = []
+        stream_la_missing: List[str] = []
+
+        # M1 + M1_online across Q in {50, 200, 800} at B=4
+        for q_val in (50, 200, 800):
+            comp_la_m1 = compare_pair(
+                idx_m1_combined,
+                stream,
+                "nearest_initial",
+                4,
+                q_val,
+                "arithmetic",
+                "extra_search",
+                "extra_search_online",
+                expected_seeds=m1_seeds,
+                scan_res=scan_m1_combined,
+            )
+            comp_la_m1["experiment"] = "M1+M1_online"
+            comp_la_m1["comparison_type"] = f"LOOKAHEAD_M1_B4_Q{q_val}"
+            paired_rows.append(comp_la_m1)
+            lookahead_rows.append(comp_la_m1)
+            if not comp_la_m1["complete"]:
+                _, miss_items = check_condition_complete(
+                    scan_m1_combined,
+                    stream,
+                    "nearest_initial",
+                    4,
+                    q_val,
+                    "arithmetic",
+                    ["extra_search", "extra_search_online"],
+                )
+                stream_la_missing.extend(miss_items)
+                stream_la_parts.append(f"M1(B=4,Q={q_val}): {comp_la_m1['status']}")
+            else:
+                stream_la_parts.append(
+                    f"M1(B=4,Q={q_val}): {fmt_diff_pts(comp_la_m1['recent_diff_mean'], comp_la_m1['recent_diff_ci95_low'], comp_la_m1['recent_diff_ci95_high'])}"
+                )
+
+        # M3 across B in {2, 4, 8} at Q=200
+        for b_sum in (2, 4, 8):
+            comp_la_m3 = compare_pair(
+                idx_m3,
+                stream,
+                "time_segment_g",
+                b_sum,
+                200,
+                "arithmetic",
+                "extra_search",
+                "extra_search_online",
+                expected_seeds=m3_seeds,
+                scan_res=scan_m3,
+            )
+            comp_la_m3["experiment"] = "M3"
+            comp_la_m3["comparison_type"] = f"LOOKAHEAD_M3_B{b_sum}_Q200"
+            paired_rows.append(comp_la_m3)
+            lookahead_rows.append(comp_la_m3)
+            if not comp_la_m3["complete"]:
+                _, miss_items = check_condition_complete(
+                    scan_m3,
+                    stream,
+                    "time_segment_g",
+                    b_sum,
+                    200,
+                    "arithmetic",
+                    ["extra_search", "extra_search_online"],
+                )
+                stream_la_missing.extend(miss_items)
+                stream_la_parts.append(f"M3(B={b_sum},Q=200): {comp_la_m3['status']}")
+            else:
+                stream_la_parts.append(
+                    f"M3(B={b_sum},Q=200): {fmt_diff_pts(comp_la_m3['recent_diff_mean'], comp_la_m3['recent_diff_ci95_low'], comp_la_m3['recent_diff_ci95_high'])}"
+                )
+
+        if stream_la_missing:
+            inc_str = format_incomplete_status(stream_la_missing)
+            lookahead_stream_status[stream] = inc_str
+            lookahead_stream_disp[stream] = f"{inc_str} — {'; '.join(stream_la_parts)}"
+            incomplete_hypothesis_items.append(f"- **LOOKAHEAD ({stream})**: **{inc_str}**")
+        else:
+            lookahead_stream_status[stream] = "REPORTED"
+            lookahead_stream_disp[stream] = "; ".join(stream_la_parts)
+
+    lookahead_outcome_str = (
+        f"steady={lookahead_stream_status['steady']}, "
+        f"new_topic={lookahead_stream_status['new_topic']}"
+    )
+    hypothesis_rows.append(
+        {
+            "hypothesis": "LOOKAHEAD",
+            "experiment": "M1 + M1_online (B=4, Q in {50, 200, 800}) & M3 (Q=200, B in {2, 4, 8})",
+            "rule": "extra_search - extra_search_online recent recall@10 reported with 95% paired bootstrap intervals per stream",
+            "steady_value": lookahead_stream_disp["steady"],
+            "new_topic_value": lookahead_stream_disp["new_topic"],
+            "outcome": lookahead_outcome_str,
+        }
+    )
+
     df_hyp = pd.DataFrame(hypothesis_rows)
     df_paired = pd.DataFrame(paired_rows)
     df_breakeven = pd.DataFrame(breakeven_rows)
+    df_breakeven_online = pd.DataFrame(breakeven_online_rows)
+    df_lookahead = pd.DataFrame(lookahead_rows)
 
     df_hyp.to_csv(out_dir / "hypothesis_tests.csv", index=False)
     df_paired.to_csv(out_dir / "paired_comparisons.csv", index=False)
     df_breakeven.to_csv(out_dir / "breakeven_q.csv", index=False)
+    df_breakeven_online.to_csv(out_dir / "breakeven_q_online.csv", index=False)
+    df_lookahead.to_csv(out_dir / "lookahead_comparison.csv", index=False)
 
     # Spearman comparison table: compare the two estimators on the SAME refresh decisions (epochs where both are defined)
     spearman_rows: List[Dict[str, Any]] = []
-    for exp_label, df_cond in [("M1", df_m1), ("M2", df_m2), ("sens", df_sens)]:
+    for exp_label, df_cond in [("M1", df_m1), ("M2", df_m2), ("sens", df_sens), ("M3", df_m3)]:
         if df_cond.empty:
             continue
         sub_sp = df_cond[df_cond["policy"].isin(REFRESH_RULES)].copy()
@@ -2029,9 +2951,15 @@ def analyze_all(
     df_spearman = pd.DataFrame(spearman_rows)
     df_spearman.to_csv(out_dir / "spearman_comparison.csv", index=False)
 
-    # Check failed_runs.json across M1, M2, sens
+    # Check failed_runs.json across M1, M2, sens, M1_online, M3
     failed_runs_summary: Dict[str, Dict[str, Any]] = {}
-    for name, d, scan_obj in [("M1", m1_dir, scan_m1), ("M2", m2_dir, scan_m2), ("sens", sens_dir, scan_sens)]:
+    for name, d, scan_obj in [
+        ("M1", m1_dir, scan_m1),
+        ("M2", m2_dir, scan_m2),
+        ("sens", sens_dir, scan_sens),
+        ("M1_online", m1_online_dir, scan_m1_online),
+        ("M3", m3_dir, scan_m3),
+    ]:
         valid_rids = {r["run_id"] for r in scan_obj["valid_runs"]}
         missing_rids = {iss["run_id"] for iss in scan_obj["issues"]}
         failed_runs_summary[name] = _parse_failed_runs_file(d, valid_rids, missing_rids)
@@ -2041,20 +2969,31 @@ def analyze_all(
         df_m1=df_m1,
         df_m2=df_m2,
         df_sens=df_sens,
+        df_m1_online=df_m1_online,
+        df_m3=df_m3,
         df_hyp=df_hyp,
         df_breakeven=df_breakeven,
+        df_breakeven_online=df_breakeven_online,
+        df_lookahead=df_lookahead,
         df_spearman=df_spearman,
         h1_stream_outcomes=h1_stream_outcomes,
         h2_checks=h2_checks,
         gate_m2_outcomes=gate_m2_outcomes,
         h3_stream_details=h3_stream_details,
         h4_table_rows=h4_table_rows,
+        pred_m2_ties_outcomes=pred_m2_ties_outcomes,
+        gate_m3_outcomes=gate_m3_outcomes,
+        h3b_stream_details=h3b_stream_details,
+        h2b_checks=h2b_checks,
+        h4b_table_rows=h4b_table_rows,
         selection_notes=selection_notes,
         failed_hypothesis_items=failed_hypothesis_items,
         incomplete_hypothesis_items=incomplete_hypothesis_items,
         scan_m1=scan_m1,
         scan_m2=scan_m2,
         scan_sens=scan_sens,
+        scan_m1_online=scan_m1_online,
+        scan_m3=scan_m3,
         failed_runs_summary=failed_runs_summary,
     )
 
@@ -2062,15 +3001,22 @@ def analyze_all(
         "df_m1": df_m1,
         "df_m2": df_m2,
         "df_sens": df_sens,
+        "df_m1_online": df_m1_online,
+        "df_m3": df_m3,
         "df_missing": df_missing,
         "df_hyp": df_hyp,
         "df_paired": df_paired,
         "df_breakeven": df_breakeven,
+        "df_breakeven_online": df_breakeven_online,
+        "df_lookahead": df_lookahead,
         "df_spearman": df_spearman,
         "failed_runs": failed_runs_summary,
         "scan_m1": scan_m1,
         "scan_m2": scan_m2,
         "scan_sens": scan_sens,
+        "scan_m1_online": scan_m1_online,
+        "scan_m3": scan_m3,
+        "pred_m2_ties": pred_m2_ties_outcomes,
     }
 
 
@@ -2117,26 +3063,37 @@ def write_summary_markdown(
     df_m1: pd.DataFrame,
     df_m2: pd.DataFrame,
     df_sens: pd.DataFrame,
+    df_m1_online: pd.DataFrame,
+    df_m3: pd.DataFrame,
     df_hyp: pd.DataFrame,
     df_breakeven: pd.DataFrame,
+    df_breakeven_online: pd.DataFrame,
+    df_lookahead: pd.DataFrame,
     df_spearman: pd.DataFrame,
     h1_stream_outcomes: Dict[str, Dict[str, Any]],
     h2_checks: Dict[str, Dict[str, Any]],
     gate_m2_outcomes: Dict[str, Dict[str, Any]],
     h3_stream_details: Dict[str, Dict[str, Any]],
     h4_table_rows: Sequence[Dict[str, Any]],
+    pred_m2_ties_outcomes: Dict[str, Dict[str, Any]],
+    gate_m3_outcomes: Dict[str, Dict[str, Any]],
+    h3b_stream_details: Dict[str, Dict[str, Any]],
+    h2b_checks: Dict[str, Dict[str, Any]],
+    h4b_table_rows: Sequence[Dict[str, Any]],
     selection_notes: Sequence[str],
     failed_hypothesis_items: Sequence[str],
     incomplete_hypothesis_items: Sequence[str],
     scan_m1: Dict[str, Any],
     scan_m2: Dict[str, Any],
     scan_sens: Dict[str, Any],
+    scan_m1_online: Dict[str, Any],
+    scan_m3: Dict[str, Any],
     failed_runs_summary: Dict[str, Dict[str, Any]],
 ) -> None:
     lines: List[str] = []
-    lines.append("# Main Experiments Summary (`M1`, `M2`, `sens`)")
+    lines.append("# Main Experiments Summary (`M1`, `M2`, `sens`, `M1_online`, `M3`)")
     lines.append("")
-    lines.append("## 1. Pre-Registered Hypothesis Outcomes (`configs/prereg_addendum1.yaml`)")
+    lines.append("## 1. Pre-Registered Hypothesis Outcomes (`configs/prereg_addendum1.yaml` & `configs/prereg_addendum2.yaml`)")
     lines.append("")
     lines.append("| Hypothesis | Experiment / Condition | Decision Rule | `steady` Result (95% Paired Bootstrap CI) | `new_topic` Result (95% Paired Bootstrap CI) | Outcome |")
     lines.append("|---|---|---|---|---|---|")
@@ -2171,7 +3128,7 @@ def write_summary_markdown(
     # Section 2: Missing or incomplete runs & Failed runs record
     lines.append("## 2. Missing or incomplete runs")
     lines.append("")
-    for scan_obj in (scan_m1, scan_m2, scan_sens):
+    for scan_obj in (scan_m1, scan_m2, scan_sens, scan_m1_online, scan_m3):
         exp_lbl = scan_obj["experiment"]
         n_exp = len(scan_obj["grid_spec"]["expected_cells"])
         n_val = len(scan_obj["valid_runs"])
@@ -2193,7 +3150,7 @@ def write_summary_markdown(
 
     lines.append("### Failed Runs Record (`failed_runs.json`)")
     lines.append("")
-    for name in ("M1", "M2", "sens"):
+    for name in ("M1", "M2", "sens", "M1_online", "M3"):
         f_info = failed_runs_summary[name]
         if not f_info["present"]:
             lines.append(f"- `{name}`: `failed_runs.json` not found (experiment unfinished or absent).")
@@ -2209,7 +3166,7 @@ def write_summary_markdown(
                 )
     lines.append("")
 
-    # Section 3: Gate values (fixing L-4: M1 is H1 < 5.00 pp; M2 is GATE_M2 >= 5.00 pp)
+    # Section 3: Gate values (M1 is H1 < 5.00 pp; M2 is GATE_M2 >= 5.00 pp; M3 is GATE_M3 >= 5.00 pp)
     lines.append("## 3. Gate Values (`always_fresh - never_refresh` Recent Recall@10 at $Q=200, B=4$)")
     lines.append("")
     lines.append("| Experiment | Placement | Stream | Criterion | `always_fresh - never_refresh` (pp, 95% CI across seeds+queries) | Within-Seed 95% CI (pp) | Paired Queries ($n$) | Outcome |")
@@ -2217,6 +3174,7 @@ def write_summary_markdown(
     for exp_name, criterion_str, outcomes_map, status_key in [
         ("M1", "H1 (< +5.00 pp)", h1_stream_outcomes, "h1_status"),
         ("M2", "GATE_M2 (>= +5.00 pp)", gate_m2_outcomes, "gate_status"),
+        ("M3", "GATE_M3 (>= +5.00 pp)", gate_m3_outcomes, "gate_status"),
     ]:
         for stream in ("steady", "new_topic"):
             c = outcomes_map[stream]
@@ -2235,46 +3193,52 @@ def write_summary_markdown(
                 )
     lines.append("")
 
-    # Section 4: H3 pairwise gaps on M2 at B=4, Q=200
-    lines.append("## 4. M2 Refresh-Rule Pairwise Comparisons (`recovered_neighbor` vs. Other Refresh Rules at $B=4, Q=200$)")
+    # Section 4: H3 pairwise gaps on M2 at B=4, Q=200 and H3b pairwise gaps on M3 at B=4, Q=200
+    lines.append("## 4. Refresh-Rule Pairwise Comparisons (`recovered_neighbor` vs. Other Refresh Rules at $B=4, Q=200$)")
     lines.append("")
-    lines.append("| Stream | `GATE_M2` Status | Baseline Rule | `recovered_neighbor - baseline` Recent Recall@10 (pp, 95% CI) | Overall Recall@10 Gap (pp, 95% CI) | Mean Budget Bytes (RN / Baseline) | Paired Queries ($n$) | Beats by $\\ge +5.00$ pp (95% CI $> 0$)? |")
-    lines.append("|---|---|---|---|---|---|---:|---|")
-    for stream in ("steady", "new_topic"):
-        det = h3_stream_details[stream]
-        gate_str = gate_m2_outcomes[stream]["gate_status"]
-        for other_rule, c in det["comparisons"].items():
-            if not det["gate_complete"]:
-                cell_outcome = gate_str
-                rec_str = c["status"]
-                ov_str = "NaN"
-                bytes_str = "NaN"
-            elif not det["gate_passed"]:
-                cell_outcome = "NOT TESTED (GATE FAILED) / FAIL"
-                rec_str = fmt_diff_pts(c["recent_diff_mean"], c["recent_diff_ci95_low"], c["recent_diff_ci95_high"]) if c["complete"] else c["status"]
-                ov_str = fmt_diff_pts(c["overall_diff_mean"], c["overall_diff_ci95_low"], c["overall_diff_ci95_high"]) if c["complete"] else "NaN"
-                bytes_str = f"{c['budget_bytes_a_mean']:,.0f} / {c['budget_bytes_b_mean']:,.0f}" if c["complete"] else "NaN"
-            elif not c["complete"]:
-                cell_outcome = c["status"]
-                rec_str = c["status"]
-                ov_str = "NaN"
-                bytes_str = "NaN"
-            else:
-                rule_ok = c["recent_diff_mean"] >= 0.05 and c["recent_diff_ci95_low"] > 0.0
-                cell_outcome = "PASS" if rule_ok else "FAIL"
-                rec_str = fmt_diff_pts(c["recent_diff_mean"], c["recent_diff_ci95_low"], c["recent_diff_ci95_high"])
-                ov_str = fmt_diff_pts(c["overall_diff_mean"], c["overall_diff_ci95_low"], c["overall_diff_ci95_high"])
-                bytes_str = f"{c['budget_bytes_a_mean']:,.0f} / {c['budget_bytes_b_mean']:,.0f}"
-            lines.append(
-                f"| `{stream}` | {gate_str} | `{other_rule}` "
-                f"| {rec_str} | {ov_str} | {bytes_str} "
-                f"| {int(c['n_paired_queries'])} "
-                f"| **{cell_outcome}** |"
-            )
+    lines.append("| Experiment (Test) | Stream | Gate Status | Baseline Rule | `recovered_neighbor - baseline` Recent Recall@10 (pp, 95% CI) | Overall Recall@10 Gap (pp, 95% CI) | Mean Budget Bytes (RN / Baseline) | Paired Queries ($n$) | Beats by $\\ge +5.00$ pp (95% CI $> 0$)? |")
+    lines.append("|---|---|---|---|---|---|---|---:|---|")
+    for exp_lbl, det_map, gate_map in [
+        ("M2 (H3)", h3_stream_details, gate_m2_outcomes),
+        ("M3 (H3b)", h3b_stream_details, gate_m3_outcomes),
+    ]:
+        for stream in ("steady", "new_topic"):
+            det = det_map[stream]
+            gate_str = gate_map[stream]["gate_status"]
+            for other_rule, c in det["comparisons"].items():
+                if not det["gate_complete"]:
+                    cell_outcome = gate_str
+                    rec_str = c["status"]
+                    ov_str = "NaN"
+                    bytes_str = "NaN"
+                elif not det["gate_passed"]:
+                    cell_outcome = "NOT TESTED (GATE FAILED) / FAIL"
+                    rec_str = fmt_diff_pts(c["recent_diff_mean"], c["recent_diff_ci95_low"], c["recent_diff_ci95_high"]) if c["complete"] else c["status"]
+                    ov_str = fmt_diff_pts(c["overall_diff_mean"], c["overall_diff_ci95_low"], c["overall_diff_ci95_high"]) if c["complete"] else "NaN"
+                    bytes_str = f"{c['budget_bytes_a_mean']:,.0f} / {c['budget_bytes_b_mean']:,.0f}" if c["complete"] else "NaN"
+                elif not c["complete"]:
+                    cell_outcome = c["status"]
+                    rec_str = c["status"]
+                    ov_str = "NaN"
+                    bytes_str = "NaN"
+                else:
+                    rule_ok = c["recent_diff_mean"] >= 0.05 and c["recent_diff_ci95_low"] > 0.0
+                    cell_outcome = "PASS" if rule_ok else "FAIL"
+                    rec_str = fmt_diff_pts(c["recent_diff_mean"], c["recent_diff_ci95_low"], c["recent_diff_ci95_high"])
+                    ov_str = fmt_diff_pts(c["overall_diff_mean"], c["overall_diff_ci95_low"], c["overall_diff_ci95_high"])
+                    bytes_str = f"{c['budget_bytes_a_mean']:,.0f} / {c['budget_bytes_b_mean']:,.0f}"
+                lines.append(
+                    f"| `{exp_lbl}` | `{stream}` | {gate_str} | `{other_rule}` "
+                    f"| {rec_str} | {ov_str} | {bytes_str} "
+                    f"| {int(c['n_paired_queries'])} "
+                    f"| **{cell_outcome}** |"
+                )
     lines.append("")
 
-    # Section 5: Break-even Q table (M1)
-    lines.append("## 5. M1 Query-Rate Sweep ($Q \\in \\{50, 200, 800\\}, B=4$) & Break-Even $Q$")
+    # Section 5: Break-even Q tables (M1 H2 and M1+M1_online H2b)
+    lines.append("## 5. M1 Query-Rate Sweep ($Q \\in \\{50, 200, 800\\}, B=4$) & Break-Even $Q$ (`H2` and `H2b`)")
+    lines.append("")
+    lines.append("### 5a. H2 (`extra_search` on `M1`)")
     lines.append("")
     lines.append("| Stream | $Q$ | Fixed $Q=200$ Best Refresh Rule (Gap to 2nd) | Best Refresh Recent Recall@10 | `extra_search` Recent Recall@10 | `push_vectors` Recent Recall@10 | `best_refresh - extra_search` (pp, 95% CI) | `best_refresh - push_vectors` (pp, 95% CI) | Break-Even $Q$ (Refresh vs. `extra_search`) |")
     lines.append("|---|---:|---|---:|---:|---:|---|---|---|")
@@ -2301,8 +3265,37 @@ def write_summary_markdown(
             )
     lines.append("")
 
-    # Section 6: H4 per-B comparison table
-    lines.append("## 6. M2 Equal-Bytes Comparison Across Budget $B \\in \\{2, 4, 8\\}$ ($Q=200$, H4)")
+    lines.append("### 5b. H2b (`extra_search_online` on `M1 + M1_online`)")
+    lines.append("")
+    lines.append("| Stream | $Q$ | Fixed $Q=200$ Best Refresh Rule (Gap to 2nd) | Best Refresh Recent Recall@10 | `extra_search_online` Recent Recall@10 | `push_vectors` Recent Recall@10 | `best_refresh - extra_search_online` (pp, 95% CI) | `best_refresh - push_vectors` (pp, 95% CI) | Break-Even $Q$ (Refresh vs. `extra_search_online`) |")
+    lines.append("|---|---:|---|---:|---:|---:|---|---|---|")
+    for _, r in df_breakeven_online.iterrows():
+        stream = str(r["stream_mode"])
+        if r["status"] != "COMPLETE":
+            lines.append(
+                f"| `{stream}` | {int(r['queries_per_epoch'])} | `{r['best_refresh_policy']}` "
+                f"| NaN | NaN | NaN | {r['status']} | {r['status']} | {r['breakeven_q']} |"
+            )
+        else:
+            rule_lbl = (
+                f"`{r['best_refresh_policy']}` "
+                f"({r['gap_to_second_best_pp']:+.2f} pp vs `{r['second_best_refresh_policy']}`)"
+            )
+            lines.append(
+                f"| `{stream}` | {int(r['queries_per_epoch'])} | {rule_lbl} "
+                f"| {r['best_refresh_recent_recall']:.4f} "
+                f"| {r['extra_search_online_recent_recall']:.4f} "
+                f"| {r['push_vectors_recent_recall']:.4f} "
+                f"| {fmt_diff_pts(r['refresh_minus_extra_search_online_mean'], r['refresh_minus_extra_search_online_ci95_low'], r['refresh_minus_extra_search_online_ci95_high'])} "
+                f"| {fmt_diff_pts(r['refresh_minus_push_vectors_mean'], r['refresh_minus_push_vectors_ci95_low'], r['refresh_minus_push_vectors_ci95_high'])} "
+                f"| {r['breakeven_q']} |"
+            )
+    lines.append("")
+
+    # Section 6: H4 and H4b per-B comparison tables
+    lines.append("## 6. Equal-Bytes Comparison Across Budget $B \\in \\{2, 4, 8\\}$ ($Q=200$, `H4` on `M2` and `H4b` on `M3`)")
+    lines.append("")
+    lines.append("### 6a. H4 (`M2`, `time_segment`, vs. `extra_search` and `push_vectors`)")
     lines.append("")
     lines.append("| Stream | $B$ | Best Refresh Rule (Same-Data Selection Gap to 2nd) | Winner | `best_refresh - extra_search` (pp, 95% CI) | `best_refresh - push_vectors` (pp, 95% CI) | `extra_search - push_vectors` (pp, 95% CI) | Mean Budget Bytes | Outcome |")
     lines.append("|---|---:|---|---|---|---|---|---|---|")
@@ -2321,6 +3314,51 @@ def write_summary_markdown(
                 f"| `{r_h4['stream_mode']}` | {int(r_h4['budget_summaries'])} | {rule_lbl} | `{r_h4['winner']}` "
                 f"| {r_h4['ref_vs_es_str']} | {r_h4['ref_vs_pv_str']} | {r_h4['es_vs_pv_str']} "
                 f"| {r_h4['bytes_str']} | **{r_h4['status']}** |"
+            )
+    lines.append("")
+
+    lines.append("### 6b. H4b (`M3`, `time_segment_g` $G=8$, vs. `extra_search_online` and `push_vectors`)")
+    lines.append("")
+    lines.append("| Stream | $B$ | Best Refresh Rule (Same-Data Selection Gap to 2nd) | Winner | `best_refresh - extra_search_online` (pp, 95% CI) | `best_refresh - push_vectors` (pp, 95% CI) | `extra_search_online - push_vectors` (pp, 95% CI) | Mean Budget Bytes | Outcome |")
+    lines.append("|---|---:|---|---|---|---|---|---|---|")
+    for r_h4b in h4b_table_rows:
+        if r_h4b["status"].startswith("INCOMPLETE"):
+            lines.append(
+                f"| `{r_h4b['stream_mode']}` | {int(r_h4b['budget_summaries'])} | INCOMPLETE | INCOMPLETE "
+                f"| {r_h4b['status']} | {r_h4b['status']} | {r_h4b['status']} | INCOMPLETE | **{r_h4b['status']}** |"
+            )
+        else:
+            rule_lbl = (
+                f"`{r_h4b['best_refresh_policy']}` "
+                f"({r_h4b['gap_to_second_best_pp']:+.2f} pp vs `{r_h4b['second_best_refresh_policy']}`)"
+            )
+            lines.append(
+                f"| `{r_h4b['stream_mode']}` | {int(r_h4b['budget_summaries'])} | {rule_lbl} | `{r_h4b['winner']}` "
+                f"| {r_h4b['ref_vs_eso_str']} | {r_h4b['ref_vs_pv_str']} | {r_h4b['eso_vs_pv_str']} "
+                f"| {r_h4b['bytes_str']} | **{r_h4b['status']}** |"
+            )
+    lines.append("")
+
+    # Section 6c: LOOKAHEAD table
+    lines.append("### 6c. Lookahead Advantage (`extra_search - extra_search_online`, `LOOKAHEAD`)")
+    lines.append("")
+    lines.append("| Experiment | Placement | Stream | $B$ | $Q$ | `extra_search - extra_search_online` Recent Recall@10 (pp, 95% CI) | Overall Recall@10 Gap (pp, 95% CI) | Mean Budget Bytes (ES / ESO) | Paired Queries ($n$) |")
+    lines.append("|---|---|---|---:|---:|---|---|---|---:|")
+    for _, r_la in df_lookahead.iterrows():
+        if not bool(r_la["complete"]):
+            lines.append(
+                f"| `{r_la['experiment']}` | `{r_la['placement_mode']}` | `{r_la['stream_mode']}` "
+                f"| {int(r_la['budget_summaries'])} | {int(r_la['queries_per_epoch'])} "
+                f"| {r_la['status']} | NaN | NaN | 0 |"
+            )
+        else:
+            lines.append(
+                f"| `{r_la['experiment']}` | `{r_la['placement_mode']}` | `{r_la['stream_mode']}` "
+                f"| {int(r_la['budget_summaries'])} | {int(r_la['queries_per_epoch'])} "
+                f"| {fmt_diff_pts(r_la['recent_diff_mean'], r_la['recent_diff_ci95_low'], r_la['recent_diff_ci95_high'])} "
+                f"| {fmt_diff_pts(r_la['overall_diff_mean'], r_la['overall_diff_ci95_low'], r_la['overall_diff_ci95_high'])} "
+                f"| {r_la['budget_bytes_a_mean']:,.0f} / {r_la['budget_bytes_b_mean']:,.0f} "
+                f"| {int(r_la['n_paired_queries'])} |"
             )
     lines.append("")
 
@@ -2367,18 +3405,28 @@ def write_summary_markdown(
     lines.extend(_render_condition_markdown_table(df_sens))
     lines.append("")
 
+    lines.append("## 11. Experiment M1_online Condition Table (`nearest_initial`, `extra_search_online`, 5 Seeds: 42–46)")
+    lines.append("")
+    lines.extend(_render_condition_markdown_table(df_m1_online))
+    lines.append("")
+
+    lines.append("## 12. Experiment M3 Condition Table (`time_segment_g`, $G=8$, 5 Seeds: 42–46)")
+    lines.append("")
+    lines.extend(_render_condition_markdown_table(df_m3))
+    lines.append("")
+
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Analyze main DVS experiments M1, M2, and sens.")
+    parser = argparse.ArgumentParser(description="Analyze main DVS experiments M1, M2, sens, M1_online, and M3.")
     parser.add_argument(
         "--results-root",
         "--results-dir",
         dest="results_root",
         type=Path,
         default=Path(__file__).resolve().parent.parent / "results",
-        help="Root directory containing main/M1, main/M2, main/sens (or M1, M2, sens directly).",
+        help="Root directory containing main/M1, main/M2, main/sens, main/M1_online, main/M3.",
     )
     parser.add_argument(
         "--out",
@@ -2393,7 +3441,7 @@ def main() -> None:
         dest="configs_dir",
         type=Path,
         default=Path(__file__).resolve().parent.parent / "configs",
-        help="Directory containing main_M1.yaml, main_M2.yaml, and main_sens.yaml.",
+        help="Directory containing main_M1.yaml, main_M2.yaml, main_sens.yaml, main_M1_online.yaml, main_M3.yaml.",
     )
     args = parser.parse_args()
     analyze_all(results_root=args.results_root, out_dir=args.out_dir, configs_dir=args.configs_dir)
