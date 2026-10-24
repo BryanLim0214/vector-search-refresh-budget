@@ -1,0 +1,26 @@
+experiment: smoke
+description: "Tiny smoke run (S=8, 5 epochs, 2,000 vectors subset: 1,000 initial + 1,000 streamed)"
+initial_vectors_limit: 1000
+stream_vectors_limit: 1000
+num_shards: 8
+c: 16
+m: 2
+budget_summaries: 2
+num_epochs: 5
+inserts_per_epoch: 200
+queries_per_epoch: 50
+recent_window_w: 2
+stream_modes: [steady]
+bursts: false
+sharding_mode: kmeans
+seeds: [42]
+policies:
+  - round_robin
+  - data_change
+  - recovered_neighbor
+  - ql
+  - ss
+  - extra_search
+  - push_vectors
+  - always_fresh
+  - all_shards

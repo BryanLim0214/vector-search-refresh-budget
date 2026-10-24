@@ -1,0 +1,21 @@
+experiment: exp4_sweeps
+description: "Sweeps over shard count S in {16, 32, 64}, fanout m in {2, 4}, and query rate Q for break-even"
+num_shards: [16, 32, 64]
+c: 16
+m: [2, 4]
+budget_summaries: [4]
+num_epochs: 50
+inserts_per_epoch: 1000
+queries_per_epoch: [50, 100, 200, 400]
+recent_window_w: 2
+stream_modes: [cluster_order]
+bursts: false
+sharding_mode: kmeans
+seeds: [42, 43, 44, 45, 46]
+policies:
+  - recovered_neighbor
+  - data_change
+  - round_robin
+  - extra_search
+  - push_vectors
+  - always_fresh

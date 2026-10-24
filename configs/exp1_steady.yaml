@@ -1,0 +1,24 @@
+experiment: exp1_steady
+description: "Main steady-stream comparison across budgets B in {2, 4, 8, 16} summaries and 5 seeds"
+num_shards: [32]
+c: 16
+m: [2]
+budget_summaries: [2, 4, 8, 16]
+num_epochs: 50
+inserts_per_epoch: 1000
+queries_per_epoch: [200]
+recent_window_w: 2
+stream_modes: [steady]
+bursts: false
+sharding_mode: kmeans
+seeds: [42, 43, 44, 45, 46]
+policies:
+  - round_robin
+  - data_change
+  - recovered_neighbor
+  - ql
+  - ss
+  - extra_search
+  - push_vectors
+  - always_fresh
+  - all_shards

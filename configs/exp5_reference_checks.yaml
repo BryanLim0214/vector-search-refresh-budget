@@ -1,0 +1,21 @@
+experiment: exp5_reference_checks
+description: "Reference checks: hash sharding vs k-means, setup cost charged to B, and bursty arrivals"
+num_shards: [32]
+c: 16
+m: [2]
+budget_summaries: [4]
+num_epochs: 50
+inserts_per_epoch: 1000
+queries_per_epoch: [200]
+recent_window_w: 2
+stream_modes: [cluster_order]
+bursts: true
+sharding_mode: hash
+charge_setup_to_budget: true
+seeds: [42, 43, 44, 45, 46]
+policies:
+  - recovered_neighbor
+  - data_change
+  - round_robin
+  - extra_search
+  - push_vectors
