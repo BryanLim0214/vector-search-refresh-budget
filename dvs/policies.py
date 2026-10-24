@@ -10,7 +10,7 @@ Refresh rules (sending whole 24,576-byte summaries under budget B):
   5. ss (Shokouhi 2007 shard size)
 Equal-bytes alternatives (under budget B):
   6. extra_search (1,656 bytes per extra shard search, prioritized by smallest gap s_(m) - s_(m+1))
-  7. push_vectors (1,536 bytes per pushed vector, newest vectors pushed first, searched at coordinator)
+  7. push_vectors (1,544 bytes per pushed vector: 1,536-byte vector + 8-byte ID, newest vectors pushed first, searched at coordinator)
 References (no byte limit, reported for context):
   8. never_refresh (published summaries never change after setup)
   9. always_fresh (unbounded summary refresh of all S shards every epoch; fresh-summary reference)
@@ -20,6 +20,7 @@ References (no byte limit, reported for context):
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -27,6 +28,8 @@ import numpy as np
 
 from dvs.bus import (
     ByteBus,
+    PUSH_VECTOR_BYTES,
+    SAMPLE_QUERIES_COUNT,
     SETUP_SAMPLE_VECTORS_PER_SHARD_BYTES,
     SHARD_SEARCH_BYTES,
     SUMMARY_BYTES,
@@ -67,6 +70,13 @@ STARVATION_CAP_EPOCHS: int = 8
 AGING_MODES = frozenset({"starvation_cap", "additive"})
 
 
+def compute_arithmetic_starvation_cap(num_shards: int, num_summaries_per_epoch: int) -> int:
+    """Return starvation cap A = ceil(2 * S / k), where k is summaries a rule can send per epoch."""
+    if num_summaries_per_epoch <= 0:
+        return int(2 * num_shards)
+    return int(math.ceil((2.0 * float(num_shards)) / float(num_summaries_per_epoch)))
+
+
 def scale_scores_unit_interval(raw_scores: np.ndarray) -> np.ndarray:
     """Scale raw scores across shards to [0, 1]. Returns zeros if max == min."""
     scores = np.asarray(raw_scores, dtype=np.float64)
@@ -96,6 +106,8 @@ class PolicyEpochDecision:
     num_extra_searches: int = 0
     num_pushed_vectors: int = 0
     overhead_bytes: int = 0
+    num_forced_by_cap: int = 0
+    effective_starvation_cap: int = 0
 
 
 class PolicyController:
@@ -110,7 +122,7 @@ class PolicyController:
         num_epochs: int = 50,
         charge_setup_to_budget: bool = False,
         aging_mode: str = "starvation_cap",
-        starvation_cap_epochs: int = STARVATION_CAP_EPOCHS,
+        starvation_cap_epochs: Optional[int] = None,
         aging_per_epoch: float = AGING_PER_EPOCH,
     ) -> None:
         if policy not in ALL_POLICIES:
@@ -124,12 +136,42 @@ class PolicyController:
         self.num_epochs = int(num_epochs)
         self.charge_setup_to_budget = bool(charge_setup_to_budget)
         self.aging_mode = str(aging_mode)
-        self.starvation_cap_epochs = int(starvation_cap_epochs)
+        self.starvation_cap_epochs: Optional[int] = (
+            int(starvation_cap_epochs) if starvation_cap_epochs is not None else None
+        )
         self.aging_per_epoch = float(aging_per_epoch)
         self._rr_cursor: int = 0
 
         # Track unpushed streamed vectors in arrival order: list of (doc_id, shard_id, vector)
         self._unpushed_stream_buffer: List[Tuple[int, int, np.ndarray]] = []
+
+    def summaries_per_epoch(self, num_sample_queries: int = SAMPLE_QUERIES_COUNT) -> int:
+        """Return k, the number of summaries this rule can send per epoch at budget B after its own overhead."""
+        if self.policy == "always_fresh":
+            return self.num_shards
+        if self.policy not in REFRESH_POLICIES:
+            return min(self.num_shards, max(0, self.budget_bytes // SUMMARY_BYTES))
+        rem = self.budget_bytes
+        if self.policy == "recovered_neighbor":
+            m_eff = min(self.num_shards, self.m)
+            rn_overhead = recovered_neighbor_overhead_bytes(
+                num_shards=self.num_shards,
+                m=m_eff,
+                num_sample_queries=num_sample_queries,
+            )
+            amortized_setup = 0
+            if self.charge_setup_to_budget:
+                total_setup = SETUP_SAMPLE_VECTORS_PER_SHARD_BYTES * self.num_shards
+                amortized_setup = (total_setup + self.num_epochs - 1) // self.num_epochs
+            rem -= rn_overhead + amortized_setup
+        return min(self.num_shards, max(0, rem // SUMMARY_BYTES))
+
+    def effective_starvation_cap(self, num_sample_queries: int = SAMPLE_QUERIES_COUNT) -> int:
+        """Return effective starvation cap A (fixed integer if set, else ceil(2 * S / k))."""
+        if self.starvation_cap_epochs is not None:
+            return int(self.starvation_cap_epochs)
+        k = self.summaries_per_epoch(num_sample_queries=num_sample_queries)
+        return compute_arithmetic_starvation_cap(self.num_shards, k)
 
     def record_new_arrivals(
         self,
@@ -326,7 +368,7 @@ class PolicyController:
             return decision
 
         if self.policy == "push_vectors":
-            max_push = self.budget_bytes // VECTOR_BYTES
+            max_push = self.budget_bytes // PUSH_VECTOR_BYTES
             if max_push > 0 and self._unpushed_stream_buffer:
                 # Push newest vectors first (from the end of the arrival buffer)
                 n_take = min(max_push, len(self._unpushed_stream_buffer))
@@ -424,6 +466,12 @@ class PolicyController:
             raise ValueError(f"Unhandled refresh policy: {self.policy}")
 
         num_summaries_to_send = min(self.num_shards, max(0, remaining_budget // SUMMARY_BYTES))
+        cap_epochs = (
+            int(self.starvation_cap_epochs)
+            if self.starvation_cap_epochs is not None
+            else compute_arithmetic_starvation_cap(self.num_shards, num_summaries_to_send)
+        )
+        decision.effective_starvation_cap = cap_epochs
         ages = np.array([s.epochs_since_refresh for s in shards], dtype=np.float64)
         scaled = scale_scores_unit_interval(raw_scores)
         if self.aging_mode == "additive":
@@ -445,7 +493,7 @@ class PolicyController:
                     cand_sid = (self._rr_cursor + offset) % self.num_shards
                     if (
                         shards[cand_sid].num_new_vectors > 0
-                        and shards[cand_sid].epochs_since_refresh > self.starvation_cap_epochs
+                        and shards[cand_sid].epochs_since_refresh > cap_epochs
                     ):
                         selected_shards.append(cand_sid)
                         if len(selected_shards) == num_summaries_to_send:
@@ -471,15 +519,23 @@ class PolicyController:
             if self.aging_mode == "starvation_cap":
                 # Starvation cap: any shard waiting > A epochs (with new vectors) is refreshed first,
                 # with ties broken by the rule's score (priorities), then shard_id.
-                is_starved = (ages > self.starvation_cap_epochs).astype(np.int64)
+                is_starved = (ages > cap_epochs).astype(np.int64)
                 order = np.lexsort((shard_ids, -priorities, -is_starved, -has_new))
             else:
                 # Legacy additive aging: priority = scaled_score + 0.5 * epochs_waited
                 order = np.lexsort((shard_ids, -priorities, -has_new))
             selected_shards = [int(sid) for sid in order[:num_summaries_to_send]]
 
+        forced_count = 0
         for sid in selected_shards:
+            if (
+                self.aging_mode == "starvation_cap"
+                and shards[sid].num_new_vectors > 0
+                and shards[sid].epochs_since_refresh > cap_epochs
+            ):
+                forced_count += 1
             coordinator.receive_summary(epoch=epoch, shard=shards[sid])
             decision.refreshed_shards.append(sid)
+        decision.num_forced_by_cap = forced_count
 
         return decision

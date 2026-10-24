@@ -34,6 +34,7 @@ from dvs.bus import (
     ByteBus,
     CUTOFFS_PER_SHARD_BYTES,
     DIM,
+    PUSH_VECTOR_BYTES,
     RESULT_BYTES,
     SAMPLE_REPLY_PER_SHARD_QUERY_BYTES,
     SETUP_SAMPLE_VECTORS_PER_SHARD_BYTES,
@@ -47,7 +48,12 @@ from dvs.bus import (
 from dvs.coordinator import Coordinator
 from dvs.data import load_dataset, normalize_l2
 from dvs.metrics import compute_spearman_correlation
-from dvs.policies import PolicyController, REFERENCE_POLICIES, REFRESH_POLICIES
+from dvs.policies import (
+    PolicyController,
+    REFERENCE_POLICIES,
+    REFRESH_POLICIES,
+    compute_arithmetic_starvation_cap,
+)
 from dvs.run import run_single_simulation
 from dvs.shards import Shard
 from dvs.streams import partition_new_topic_stream
@@ -267,6 +273,7 @@ def test_3_byte_accounting_and_overhead(real_subset_data) -> None:
     charge_setup_to_budget=True does not double-count amortized setup bytes.
     """
     assert VECTOR_BYTES == 1536
+    assert PUSH_VECTOR_BYTES == 1544
     assert SUMMARY_BYTES == 24576
     assert RESULT_BYTES == 120
     assert SHARD_SEARCH_BYTES == 1656
@@ -615,7 +622,7 @@ def test_7_equal_bytes_alternatives_never_exceed_budget(real_subset_data) -> Non
                     assert spent == expected
                     assert int(row["bytes_summary_refresh"]) == 0
                 else:
-                    expected = (budget_bytes // VECTOR_BYTES) * VECTOR_BYTES
+                    expected = (budget_bytes // PUSH_VECTOR_BYTES) * PUSH_VECTOR_BYTES
                     assert spent == expected
                     assert int(row["bytes_summary_refresh"]) == 0
 
@@ -654,6 +661,8 @@ def test_8_spearman_cpu_aging_and_new_topic(real_subset_data) -> None:
         seed=42,
     )
     assert "spearman_n_defined" in res_dc.summary
+    assert "spearman_new_vecs_n_defined" in res_dc.summary
+    assert "spearman_new_vecs_rho_mean" in res_dc.summary
     assert res_dc.summary["cpu_ground_truth_s_total"] >= 0.0
     assert np.isclose(
         res_dc.summary["cpu_total_s"],
@@ -662,6 +671,25 @@ def test_8_spearman_cpu_aging_and_new_topic(real_subset_data) -> None:
         + res_dc.summary["cpu_policy_s_total"]
         + res_dc.summary["cpu_query_s_total"],
     )
+
+    # Verify arithmetic starvation cap A = ceil(2 * S / k)
+    assert compute_arithmetic_starvation_cap(num_shards=32, num_summaries_per_epoch=4) == 16
+    assert compute_arithmetic_starvation_cap(num_shards=32, num_summaries_per_epoch=3) == 22
+    assert compute_arithmetic_starvation_cap(num_shards=32, num_summaries_per_epoch=8) == 8
+    ctrl_arith_dc = PolicyController(
+        policy="data_change",
+        budget_bytes=4 * SUMMARY_BYTES,
+        num_shards=32,
+        m=2,
+    )
+    assert ctrl_arith_dc.effective_starvation_cap() == 16
+    ctrl_arith_rn = PolicyController(
+        policy="recovered_neighbor",
+        budget_bytes=4 * SUMMARY_BYTES,
+        num_shards=32,
+        m=2,
+    )
+    assert ctrl_arith_rn.effective_starvation_cap() == 22
 
     # Fix 6: Starvation cap A = 8 vs additive aging
     # Construct 4 shards where shard 0 has waited 9 epochs (> A=8) with lower data_change score,
@@ -757,3 +785,28 @@ def test_8_spearman_cpu_aging_and_new_topic(real_subset_data) -> None:
     assert res_nt.summary["initial_set_size"] + res_nt.summary["stream_set_size"] == 2000
     assert res_nt.summary["queries_with_most_neighbors_in_stream"] is not None
     assert int(res_nt.epochs_df["total_indexed_vectors"].iloc[-1]) == 2000
+
+    # Verify time_segment placement: inserts of epoch e go to shard (e mod S)
+    res_ts = run_single_simulation(
+        initial_vectors=init_v,
+        initial_ids=init_id,
+        stream_vectors=stream_v,
+        stream_ids=stream_id,
+        test_queries=test_q,
+        test_query_ids=test_qid,
+        sample_queries=sample_q,
+        sample_query_ids=sample_qid,
+        policy="never_refresh",
+        num_shards=4,
+        m=2,
+        budget_summaries=2,
+        num_epochs=5,
+        inserts_per_epoch=100,
+        queries_per_epoch=20,
+        stream_mode="steady",
+        placement_mode="time_segment",
+        seed=42,
+    )
+    assert res_ts.summary["placement_mode"] == "time_segment"
+    assert res_ts.summary["starvation_cap_mode"] == "arithmetic"
+    assert res_ts.summary["starvation_cap_epochs"] == 4

@@ -65,7 +65,7 @@ class Coordinator:
         doc_ids: np.ndarray,
         shard_ids: np.ndarray,
     ) -> int:
-        """Store pushed vectors locally at the coordinator and log 1,536 bytes each on the bus."""
+        """Store pushed vectors locally at the coordinator and log 1,544 bytes (vector + 8-byte ID) each on the bus."""
         if len(vectors) == 0:
             return 0
         vecs = np.ascontiguousarray(vectors, dtype=np.float32)

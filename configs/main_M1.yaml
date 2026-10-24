@@ -1,0 +1,32 @@
+experiment: main/M1
+description: "Main Experiment M1 (centroid placement nearest_initial): streams steady and new_topic, 11 methods, B=4, Q in {50, 200, 800}, S=32, m=2, c=16, W=2, starvation cap by arithmetic, 5 seeds"
+num_shards: [32]
+c: 16
+m: [2]
+budget_summaries: [4]
+num_epochs: 50
+inserts_per_epoch: 1000
+queries_per_epoch: [50, 200, 800]
+recent_window_w: 2
+stream_modes:
+  - steady
+  - new_topic
+placement_mode: nearest_initial
+bursts: false
+sharding_mode: kmeans
+charge_setup_to_budget: false
+aging_mode: starvation_cap
+starvation_cap_epochs: arithmetic
+seeds: [42, 43, 44, 45, 46]
+policies:
+  - never_refresh
+  - always_fresh
+  - oracle_routing
+  - all_shards
+  - round_robin
+  - data_change
+  - recovered_neighbor
+  - ql
+  - ss
+  - extra_search
+  - push_vectors

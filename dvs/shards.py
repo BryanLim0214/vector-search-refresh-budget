@@ -19,6 +19,8 @@ import numpy as np
 from dvs.bus import DIM, SUMMARY_CENTERS, TOP_K
 from dvs.summary import ShardSummary, compute_summary_kmeans
 
+PLACEMENT_MODES = frozenset({"nearest_initial", "time_segment"})
+
 
 class Shard:
     """Single vector shard storing raw vectors, an HNSW inner-product index, and summaries."""
@@ -248,24 +250,45 @@ class Shard:
 
 
 class ShardRouterInitializer:
-    """Partitions initial vectors into S shards and assigns streamed vectors to initial centers."""
+    """Partitions initial vectors into S shards and assigns streamed vectors by placement_mode."""
 
     def __init__(
         self,
         num_shards: int,
         initial_centroids: np.ndarray,
         sharding_mode: str = "kmeans",
+        placement_mode: str = "nearest_initial",
     ) -> None:
+        if placement_mode not in PLACEMENT_MODES:
+            raise ValueError(
+                f"Unknown placement_mode '{placement_mode}'. Expected one of {sorted(PLACEMENT_MODES)}"
+            )
         self.num_shards = int(num_shards)
         self.initial_centroids = np.ascontiguousarray(initial_centroids, dtype=np.float32)
         self.sharding_mode = sharding_mode
+        self.placement_mode = str(placement_mode)
 
-    def assign_shards(self, vectors: np.ndarray, doc_ids: np.ndarray) -> np.ndarray:
+    def assign_shards(
+        self,
+        vectors: np.ndarray,
+        doc_ids: np.ndarray,
+        epoch: Optional[int] = None,
+    ) -> np.ndarray:
         """Assign each vector to a shard in [0, S-1].
 
-        Under 'kmeans', assigns to the nearest initial center (minimum L2 distance / maximum dot product).
-        Under 'hash', assigns by doc_id % S (reference check).
+        - For initial setup (`epoch is None` or `epoch < 0`), partitions by `sharding_mode`
+          ('kmeans' nearest initial center, or 'hash' doc_id % S).
+        - For stream insertions (`epoch >= 0`):
+          * Under `placement_mode == 'time_segment'`, assigns all inserts of epoch `e` to
+            shard `e % S` (growing segment that fills by arrival time).
+          * Under `placement_mode == 'nearest_initial'`, assigns by `sharding_mode` ('kmeans'
+            nearest initial center, or 'hash' doc_id % S).
         """
+        if len(vectors) == 0:
+            return np.empty(0, dtype=np.int64)
+        if epoch is not None and int(epoch) >= 0 and self.placement_mode == "time_segment":
+            target_shard = int(epoch) % self.num_shards
+            return np.full(len(vectors), target_shard, dtype=np.int64)
         if self.sharding_mode == "hash":
             return (np.asarray(doc_ids, dtype=np.int64) % self.num_shards).astype(np.int64)
         v = np.ascontiguousarray(vectors, dtype=np.float32)
@@ -287,6 +310,7 @@ def build_initial_shards(
     ef_search: int = 100,
     seed: int = 42,
     sharding_mode: str = "kmeans",
+    placement_mode: str = "nearest_initial",
     max_elements_per_shard: int = 120_000,
     kmeans_niter: int = 20,
 ) -> Tuple[List[Shard], ShardRouterInitializer]:
@@ -311,8 +335,9 @@ def build_initial_shards(
         num_shards=num_shards,
         initial_centroids=init_centroids,
         sharding_mode=sharding_mode,
+        placement_mode=placement_mode,
     )
-    assignments = router.assign_shards(vecs, ids)
+    assignments = router.assign_shards(vecs, ids, epoch=-1)
 
     shards: List[Shard] = []
     for s in range(num_shards):

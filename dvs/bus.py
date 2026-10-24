@@ -2,6 +2,7 @@
 
 Every message size follows proposal/proposal.tex Section 4 strictly:
 - Vector: 384 floats * 4 bytes = 1,536 bytes
+- Pushed vector (vector + 8-byte ID): 1,536 + 8 = 1,544 bytes
 - Summary: 16 centers * 1,536 bytes = 24,576 bytes
 - Search result list: 10 * (8-byte ID + 4-byte score) = 120 bytes
 - Shard search (query out + result back): 1,536 + 120 = 1,656 bytes
@@ -24,6 +25,7 @@ SUMMARY_CENTERS: int = 16
 SAMPLE_QUERIES_COUNT: int = 64
 
 VECTOR_BYTES: int = DIM * FLOAT_BYTES  # 1,536
+PUSH_VECTOR_BYTES: int = VECTOR_BYTES + ID_BYTES  # 1,544
 SUMMARY_BYTES: int = SUMMARY_CENTERS * VECTOR_BYTES  # 24,576
 RESULT_ITEM_BYTES: int = ID_BYTES + FLOAT_BYTES  # 12
 RESULT_BYTES: int = TOP_K * RESULT_ITEM_BYTES  # 120
@@ -195,13 +197,13 @@ class ByteBus:
         self.log(
             epoch=epoch,
             category="push_vector",
-            num_bytes=VECTOR_BYTES,
+            num_bytes=PUSH_VECTOR_BYTES,
             src=f"shard_{shard_id}",
             dst="coordinator",
             charged_to_budget=True,
             note=f"doc={doc_id}",
         )
-        return VECTOR_BYTES
+        return PUSH_VECTOR_BYTES
 
     def log_summary_refresh(self, epoch: int, shard_id: int, c: int = SUMMARY_CENTERS) -> int:
         size = c * VECTOR_BYTES

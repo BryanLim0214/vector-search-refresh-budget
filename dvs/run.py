@@ -136,11 +136,12 @@ def run_single_simulation(
     stream_mode: str = "steady",
     bursts: bool = False,
     sharding_mode: str = "kmeans",
+    placement_mode: str = "nearest_initial",
     seed: int = 42,
     exact_local_search: bool = False,
     charge_setup_to_budget: bool = False,
     aging_mode: str = "starvation_cap",
-    starvation_cap_epochs: int = STARVATION_CAP_EPOCHS,
+    starvation_cap_epochs: Optional[int] = None,
     m_hnsw: int = 16,
     ef_construction: int = 200,
     ef_search: int = 100,
@@ -196,6 +197,7 @@ def run_single_simulation(
         ef_search=ef_search,
         seed=seed,
         sharding_mode=sharding_mode,
+        placement_mode=placement_mode,
         max_elements_per_shard=max_elems,
     )
     bus.log_setup_initial_summaries(num_shards=num_shards, c=c)
@@ -210,7 +212,7 @@ def run_single_simulation(
         )
 
     gt = GroundTruthIndex()
-    init_shard_assignments = router.assign_shards(initial_vectors, initial_ids)
+    init_shard_assignments = router.assign_shards(initial_vectors, initial_ids, epoch=-1)
     gt.add(
         vectors=initial_vectors,
         doc_ids=initial_ids,
@@ -235,6 +237,9 @@ def run_single_simulation(
         aging_mode=aging_mode,
         starvation_cap_epochs=starvation_cap_epochs,
     )
+
+    effective_cap = controller.effective_starvation_cap(num_sample_queries=len(sample_queries))
+    starvation_cap_mode = "arithmetic" if starvation_cap_epochs is None else "fixed"
 
     schedule = build_epoch_schedule(
         stream_vectors=stream_vectors,
@@ -263,7 +268,11 @@ def run_single_simulation(
         new_shard_ids: Optional[np.ndarray] = None
         with timer.measure("insert"):
             if len(batch.insert_vectors) > 0:
-                new_shard_ids = router.assign_shards(batch.insert_vectors, batch.insert_ids)
+                new_shard_ids = router.assign_shards(
+                    batch.insert_vectors,
+                    batch.insert_ids,
+                    epoch=epoch,
+                )
                 for s_id in range(num_shards):
                     mask = new_shard_ids == s_id
                     if np.any(mask):
@@ -296,7 +305,9 @@ def run_single_simulation(
 
         # Compute true recovered neighbors per shard BEFORE summaries are refreshed in this epoch
         true_rec_per_shard: Optional[np.ndarray] = None
+        new_vecs_per_shard: Optional[np.ndarray] = None
         if policy in REFRESH_POLICIES:
+            new_vecs_per_shard = np.array([s.num_new_vectors for s in shards], dtype=np.float64)
             with timer.measure("ground_truth"):
                 true_rec_per_shard = compute_true_recovered_neighbors_per_shard(
                     shards=shards,
@@ -330,6 +341,10 @@ def run_single_simulation(
 
         spearman_rho = compute_spearman_correlation(
             decision.estimated_recovered_neighbors,
+            true_rec_per_shard,
+        )
+        spearman_rho_new_vecs = compute_spearman_correlation(
+            new_vecs_per_shard,
             true_rec_per_shard,
         )
 
@@ -387,9 +402,12 @@ def run_single_simulation(
             "policy": policy,
             "seed": seed,
             "stream_mode": stream_mode,
+            "placement_mode": placement_mode,
             "bursts": bursts,
             "sharding_mode": sharding_mode,
             "aging_mode": aging_mode,
+            "starvation_cap_mode": starvation_cap_mode,
+            "starvation_cap_epochs": int(effective_cap),
             "num_shards": num_shards,
             "m": m,
             "m_routed": m_routed,
@@ -405,6 +423,7 @@ def run_single_simulation(
             "missed_neighbors_mean": eval_res.missed_neighbors_mean,
             "missed_neighbors_total": eval_res.missed_neighbors_total,
             "spearman_rho": eval_res.spearman_rho,
+            "spearman_rho_new_vecs": spearman_rho_new_vecs,
             "budget_bytes_spent": budget_spent,
             "budget_bytes_with_amortized_setup": bus.epoch_budget_bytes_with_amortized_setup(epoch),
             "workload_bytes": workload_spent,
@@ -420,6 +439,7 @@ def run_single_simulation(
             "bytes_query_out": cat_totals["query_out"],
             "bytes_query_result": cat_totals["query_result"],
             "num_summaries_refreshed": len(decision.refreshed_shards),
+            "num_forced_by_cap": int(decision.num_forced_by_cap),
             "num_extra_searches": decision.num_extra_searches,
             "num_pushed_vectors": decision.num_pushed_vectors,
             "total_lift_in_flips": (
@@ -453,15 +473,23 @@ def run_single_simulation(
         if spearman_n_defined > 0
         else float("nan")
     )
+    spearman_new_vecs_n_defined = int(epochs_df["spearman_rho_new_vecs"].notna().sum())
+    spearman_new_vecs_rho_mean = (
+        float(epochs_df["spearman_rho_new_vecs"].mean(skipna=True))
+        if spearman_new_vecs_n_defined > 0
+        else float("nan")
+    )
     summary = {
         "run_id": run_id,
         "policy": policy,
         "seed": seed,
         "stream_mode": stream_mode,
+        "placement_mode": placement_mode,
         "bursts": bursts,
         "sharding_mode": sharding_mode,
         "aging_mode": aging_mode,
-        "starvation_cap_epochs": int(starvation_cap_epochs),
+        "starvation_cap_mode": starvation_cap_mode,
+        "starvation_cap_epochs": int(effective_cap),
         "num_shards": num_shards,
         "c": c,
         "m": m,
@@ -507,6 +535,8 @@ def run_single_simulation(
         "missed_neighbors_total": int(epochs_df["missed_neighbors_total"].sum()),
         "spearman_rho_mean": spearman_rho_mean,
         "spearman_n_defined": spearman_n_defined,
+        "spearman_new_vecs_rho_mean": spearman_new_vecs_rho_mean,
+        "spearman_new_vecs_n_defined": spearman_new_vecs_n_defined,
         "setup_sample_vectors_bytes": int(bus.setup_sample_vectors_bytes),
         "setup_sample_vectors_per_shard_bytes": (
             SETUP_SAMPLE_VECTORS_PER_SHARD_BYTES if policy == "recovered_neighbor" else 0
@@ -521,6 +551,7 @@ def run_single_simulation(
         "total_workload_bytes": int(epochs_df["workload_bytes"].sum()),
         "total_bytes_all_categories": int(epochs_df["total_epoch_bytes"].sum()),
         "total_summaries_refreshed": int(epochs_df["num_summaries_refreshed"].sum()),
+        "total_forced_by_cap": int(epochs_df["num_forced_by_cap"].sum()),
         "total_extra_searches": int(epochs_df["num_extra_searches"].sum()),
         "total_pushed_vectors": int(epochs_df["num_pushed_vectors"].sum()),
         "total_lift_in_flips": int(epochs_df["total_lift_in_flips"].sum()),
@@ -545,10 +576,12 @@ def run_single_simulation(
         "queries_per_epoch": queries_per_epoch,
         "recent_window_w": recent_window_w,
         "stream_mode": stream_mode,
+        "placement_mode": placement_mode,
         "bursts": bursts,
         "sharding_mode": sharding_mode,
         "aging_mode": aging_mode,
-        "starvation_cap_epochs": int(starvation_cap_epochs),
+        "starvation_cap_mode": starvation_cap_mode,
+        "starvation_cap_epochs": int(effective_cap),
         "seed": seed,
         "exact_local_search": exact_local_search,
         "charge_setup_to_budget": charge_setup_to_budget,
@@ -577,8 +610,15 @@ def save_run_outputs(
     epochs_path = out_dir / "epochs.parquet"
     summary_path = out_dir / "summary.json"
     prov_path = out_dir / "provenance.json"
+    queries_path = out_dir / "queries.npz"
 
     result.epochs_df.to_parquet(epochs_path, index=False)
+    np.savez_compressed(
+        queries_path,
+        recall_at_10=result.all_query_recall.astype(np.float32),
+        recent_recall_at_10=result.all_query_recent_recall.astype(np.float32),
+        missed_neighbors=result.all_query_missed_neighbors.astype(np.int16),
+    )
     with summary_path.open("w", encoding="utf-8") as f:
         json.dump(result.summary, f, indent=2)
 
@@ -657,28 +697,42 @@ def run_from_config(
     inserts_per_epoch = int(cfg.get("inserts_per_epoch", 1000))
     c = int(cfg.get("c", SUMMARY_CENTERS))
     exact_local_search = bool(cfg.get("exact_local_search", False))
-    starvation_cap_epochs = int(cfg.get("starvation_cap_epochs", STARVATION_CAP_EPOCHS))
+    raw_cap = cfg.get("starvation_cap_epochs", None)
+    if raw_cap is None or str(raw_cap).lower() in ("arithmetic", "auto", "none", "null"):
+        default_cap_epochs: Optional[int] = None
+    else:
+        default_cap_epochs = int(raw_cap)
 
     # Support either explicit single-factor condition dicts or sweep lists over condition flags
     raw_conditions = cfg.get("conditions")
     if isinstance(raw_conditions, list) and len(raw_conditions) > 0:
         condition_specs: List[Dict[str, Any]] = []
         for cond in raw_conditions:
+            cond_cap = cond.get("starvation_cap_epochs", default_cap_epochs)
+            if cond_cap is None or str(cond_cap).lower() in ("arithmetic", "auto", "none", "null"):
+                parsed_cap: Optional[int] = None
+            else:
+                parsed_cap = int(cond_cap)
             condition_specs.append(
                 {
                     "recent_window_w": int(cond.get("recent_window_w", cfg.get("recent_window_w", 2))),
                     "bursts": bool(cond.get("bursts", cfg.get("bursts", False))),
                     "sharding_mode": str(cond.get("sharding_mode", cfg.get("sharding_mode", "kmeans"))),
+                    "placement_mode": str(
+                        cond.get("placement_mode", cfg.get("placement_mode", "nearest_initial"))
+                    ),
                     "charge_setup_to_budget": bool(
                         cond.get("charge_setup_to_budget", cfg.get("charge_setup_to_budget", False))
                     ),
                     "aging_mode": str(cond.get("aging_mode", cfg.get("aging_mode", "starvation_cap"))),
+                    "starvation_cap_epochs": parsed_cap,
                 }
             )
     else:
         w_list = [int(x) for x in _as_list(cfg.get("recent_window_w", 2))]
         bursts_list = [bool(x) for x in _as_list(cfg.get("bursts", False))]
         sharding_list = [str(x) for x in _as_list(cfg.get("sharding_mode", "kmeans"))]
+        placement_list = [str(x) for x in _as_list(cfg.get("placement_mode", "nearest_initial"))]
         charge_setup_list = [bool(x) for x in _as_list(cfg.get("charge_setup_to_budget", False))]
         aging_list = [str(x) for x in _as_list(cfg.get("aging_mode", "starvation_cap"))]
         condition_specs = [
@@ -686,12 +740,15 @@ def run_from_config(
                 "recent_window_w": w_val,
                 "bursts": b_val,
                 "sharding_mode": sh_val,
+                "placement_mode": pl_val,
                 "charge_setup_to_budget": cs_val,
                 "aging_mode": ag_val,
+                "starvation_cap_epochs": default_cap_epochs,
             }
             for w_val in w_list
             for b_val in bursts_list
             for sh_val in sharding_list
+            for pl_val in placement_list
             for cs_val in charge_setup_list
             for ag_val in aging_list
         ]
@@ -701,8 +758,11 @@ def run_from_config(
         recent_window_w = cond["recent_window_w"]
         bursts = cond["bursts"]
         sharding_mode = cond["sharding_mode"]
+        placement_mode = cond["placement_mode"]
         charge_setup_to_budget = cond["charge_setup_to_budget"]
         aging_mode = cond["aging_mode"]
+        starvation_cap_epochs = cond["starvation_cap_epochs"]
+        cap_tag = "arith" if starvation_cap_epochs is None else f"A{starvation_cap_epochs}"
         for stream_mode in streams_list:
             for s_count in shards_list:
                 for m_val in m_list:
@@ -721,9 +781,9 @@ def run_from_config(
                                         continue
                                     run_id = (
                                         f"{pol}_S{s_count}_m{m_val}_B{b_sum}_Q{q_val}"
-                                        f"_{stream_mode}_W{recent_window_w}_{sharding_mode}"
+                                        f"_{stream_mode}_{placement_mode}_W{recent_window_w}_{sharding_mode}"
                                         f"_bursts{int(bursts)}_setup{int(charge_setup_to_budget)}"
-                                        f"_{aging_mode}_seed{seed}"
+                                        f"_{aging_mode}_{cap_tag}_seed{seed}"
                                     )
                                     res = run_single_simulation(
                                         initial_vectors=init_vecs,
@@ -746,6 +806,7 @@ def run_from_config(
                                         stream_mode=str(stream_mode),
                                         bursts=bursts,
                                         sharding_mode=sharding_mode,
+                                        placement_mode=placement_mode,
                                         seed=int(seed),
                                         exact_local_search=exact_local_search,
                                         charge_setup_to_budget=charge_setup_to_budget,
@@ -775,11 +836,13 @@ def run_from_config(
                 r.config["budget_summaries"],
                 r.config["queries_per_epoch"],
                 r.config["stream_mode"],
+                r.config["placement_mode"],
                 r.config["sharding_mode"],
                 r.config["bursts"],
                 r.config["charge_setup_to_budget"],
                 r.config["recent_window_w"],
                 r.config["aging_mode"],
+                r.config["starvation_cap_mode"],
             )
 
         bootstrap_comparisons: List[Dict[str, Any]] = []
@@ -825,11 +888,13 @@ def run_from_config(
                             "budget_summaries": key[2],
                             "queries_per_epoch": key[3],
                             "stream_mode": key[4],
-                            "sharding_mode": key[5],
-                            "bursts": key[6],
-                            "charge_setup_to_budget": key[7],
-                            "recent_window_w": key[8],
-                            "aging_mode": key[9],
+                            "placement_mode": key[5],
+                            "sharding_mode": key[6],
+                            "bursts": key[7],
+                            "charge_setup_to_budget": key[8],
+                            "recent_window_w": key[9],
+                            "aging_mode": key[10],
+                            "starvation_cap_mode": key[11],
                             "baseline_policy": op,
                             "recent_recall_diff_mean": ci_rec["mean_diff"],
                             "recent_recall_ci95_low": ci_rec["ci_low"],

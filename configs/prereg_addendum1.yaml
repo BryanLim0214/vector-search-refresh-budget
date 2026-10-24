@@ -1,0 +1,166 @@
+# Pre-Registration Addendum 1 (committed prior to any main runs)
+experiment: prereg_addendum1
+description: >
+  Pre-registration addendum 1 for "Finding New Passages in Distributed Vector Search",
+  committed after the 1-seed pilot (audit/SKEPTIC_PILOT.md) and prior to executing any
+  main experiment runs (M1, M2, sensitivity).
+
+addendum_items:
+  1_placement_modes:
+    nearest_initial:
+      role: "Primary placement mode for Experiment M1 (existing mode)"
+      initial_shards: "Built by S-cluster spherical faiss.Kmeans on the initial passage set"
+      stream_inserts: "Each newly arriving passage in epoch e goes to the shard with the nearest initial center (no data movement)"
+    time_segment:
+      role: "New placement mode, primary for Experiment M2"
+      initial_shards: "Built by S-cluster spherical faiss.Kmeans on the initial passage set"
+      stream_inserts: "All inserts of epoch e go to shard (e mod S), modeling growing segments that fill by arrival time in segment-based vector stores (no data movement)"
+
+  2_starvation_cap_by_arithmetic:
+    formula: "A = ceil(2 * S / k)"
+    k_definition: "Number of whole summaries (24,576 bytes each) a refresh rule can send per epoch at budget B after deducting its own per-epoch protocol overhead"
+    examples_at_S32_m2:
+      B2_other_refresh_rules: {k: 2, A: 32}
+      B2_recovered_neighbor: {k: 1, A: 64}
+      B4_other_refresh_rules: {k: 4, A: 16}
+      B4_recovered_neighbor: {k: 3, A: 22}
+      B8_other_refresh_rules: {k: 8, A: 8}
+      B8_recovered_neighbor: {k: 7, A: 10}
+    justification: >
+      Under the previous fixed cap A = 8 epochs at S = 32, B = 4, a 4-summary/epoch rule cycles
+      through 32 shards in 8 epochs minimum and recovered_neighbor (3 summaries/epoch after 21,632 B
+      overhead) cycles in 10.7 epochs minimum. Consequently, A = 8 forced 84% (126/150) of
+      recovered_neighbor refresh choices and 64% (127/200) of data_change refresh choices on new_topic
+      in the pilot (audit/SKEPTIC_PILOT.md Section 1a). Setting A = ceil(2 * S / k) by arithmetic
+      sets the starvation threshold to twice the rule's full-shard refresh cycle.
+    sensitivity_condition: >
+      The old fixed cap A = 8 is retained as a reported sensitivity condition on M2 at B = 4, Q = 200,
+      seeds 42, 43, 44 (results/main/sens).
+
+  3_new_topic_epoch_insert_rate:
+    description: >
+      Under stream_mode = new_topic, 64-cluster spherical faiss.Kmeans partitions all 100,000 vectors
+      into 32 initial clusters and 32 streamed clusters, and all streamed vectors are inserted evenly
+      across the 50 epochs (consume_all_available = true). Because the 32 streamed clusters contain
+      approximately 52,727 vectors (at seed 42), new_topic inserts about 1,055 vectors per epoch
+      (1,055 in epochs 0..26 and 1,054 in epochs 27..49 at seed 42), rather than 1,000.
+
+  4_report_text_and_byte_fixes:
+    always_fresh_terminology: >
+      No "maximum headroom" or ceiling wording is used for always_fresh. Because 16-center spherical
+      k-means summaries are coarse routing heuristics, always_fresh is reported strictly as a
+      fresh-summary reference, while oracle_routing is the m-shard routing upper bound.
+    push_vectors_message_size_bytes: 1544
+    push_vectors_accounting: >
+      Each pushed vector message is 1,544 bytes everywhere: 1,536-byte float32 vector (384 * 4 bytes)
+      plus 8-byte int64 document ID (at B = 4 summaries = 98,304 bytes, push_vectors sends
+      floor(98304 / 1544) = 63 vectors = 97,272 bytes per epoch).
+
+  5_hypotheses_and_decision_rules:
+    bootstrap_protocol: >
+      95% confidence intervals are computed via paired bootstrap over queries within each seed,
+      combined across the 5 seeds (42, 43, 44, 45, 46) to include both query and seed variation.
+    H1_M1_centroid_placement:
+      experiment: M1
+      placement_mode: nearest_initial
+      condition: "Q = 200, B = 4, streams in {steady, new_topic}"
+      metric: "recent_recall_at_10(always_fresh) - recent_recall_at_10(never_refresh)"
+      decision_rule: >
+        PASS if mean (always_fresh - never_refresh) recent recall@10 is below 5 percentage points
+        (< 0.05) on both steady and new_topic at Q = 200, B = 4 (expected from the pilot; reported
+        with 95% paired bootstrap intervals over queries and seed variation).
+    H2_M1_alternatives_and_breakeven_Q:
+      experiment: M1
+      placement_mode: nearest_initial
+      condition: "B = 4, Q in {50, 200, 800}, streams in {steady, new_topic}"
+      decision_rule: >
+        PASS if both extra_search and push_vectors beat the best refresh rule (highest mean
+        recent_recall_at_10 among round_robin, data_change, recovered_neighbor, ql, ss) at equal
+        bytes at Q = 200 on both steady and new_topic (mean gap > 0 with 95% paired bootstrap
+        interval above zero). Also report the break-even query rate Q between the best refresh
+        rule and extra_search from the Q in {50, 200, 800} sweep.
+    GATE_M2_time_segment:
+      experiment: M2
+      placement_mode: time_segment
+      condition: "Q = 200, B = 4, evaluated separately on steady and new_topic"
+      metric: "recent_recall_at_10(always_fresh) - recent_recall_at_10(never_refresh)"
+      decision_rule: >
+        PASS on a stream if mean (always_fresh - never_refresh) recent recall@10 >= 5 percentage
+        points (>= 0.05) on that stream. The refresh-rule comparison H3 is tested only on streams
+        where GATE_M2 passes.
+    H3_M2_recovered_neighbor_vs_refresh_rules:
+      experiment: M2
+      placement_mode: time_segment
+      condition: "Q = 200, B = 4, tested only on streams where GATE_M2 passes"
+      decision_rule: >
+        PASS on a gated stream if recovered_neighbor beats every other refresh rule (round_robin,
+        data_change, ql, ss) by >= 5 percentage points (>= 0.05) in mean recent recall@10 at equal
+        bytes, with the 95% paired bootstrap interval of each gap strictly above zero. If GATE_M2
+        fails on a stream, H3 is recorded as NOT TESTED (GATE FAILED) / FAIL.
+    H4_M2_equal_bytes_across_B:
+      experiment: M2
+      placement_mode: time_segment
+      condition: "Q = 200, B in {2, 4, 8}, streams in {steady, new_topic}"
+      decision_rule: >
+        Report the equal-byte comparison of the best refresh rule vs extra_search vs push_vectors
+        across B in {2, 4, 8}; PASS for refresh if the best refresh rule beats both extra_search
+        and push_vectors (95% paired bootstrap interval of the gap above zero) at B in {2, 4, 8},
+        otherwise state which method wins at each B and mark FAIL where refresh does not beat
+        both alternatives.
+    estimator_rank_correlation_comparison:
+      description: >
+        Report the Spearman rank correlation (mean and number of defined decisions n) of the simple
+        free estimator "new vectors since last refresh" (shard.num_new_vectors prior to refresh)
+        with true recovered neighbors per shard right next to recovered_neighbor's sample-query
+        estimator correlation.
+
+main_experiments:
+  seeds: [42, 43, 44, 45, 46]
+  methods:
+    - never_refresh
+    - always_fresh
+    - oracle_routing
+    - all_shards
+    - round_robin
+    - data_change
+    - recovered_neighbor
+    - ql
+    - ss
+    - extra_search
+    - push_vectors
+  M1:
+    output_dir: "results/main/M1"
+    placement_mode: nearest_initial
+    stream_modes: [steady, new_topic]
+    budget_summaries: [4]
+    queries_per_epoch: [50, 200, 800]
+    num_shards: 32
+    m: 2
+    c: 16
+    recent_window_w: 2
+    starvation_cap: arithmetic
+    seeds: [42, 43, 44, 45, 46]
+  M2:
+    output_dir: "results/main/M2"
+    placement_mode: time_segment
+    stream_modes: [steady, new_topic]
+    budget_summaries: [2, 4, 8]
+    queries_per_epoch: [200]
+    num_shards: 32
+    m: 2
+    c: 16
+    recent_window_w: 2
+    starvation_cap: arithmetic
+    seeds: [42, 43, 44, 45, 46]
+  sens:
+    output_dir: "results/main/sens"
+    placement_mode: time_segment
+    stream_modes: [steady, new_topic]
+    budget_summaries: [4]
+    queries_per_epoch: [200]
+    num_shards: 32
+    m: 2
+    c: 16
+    recent_window_w: 2
+    starvation_cap_epochs: 8
+    seeds: [42, 43, 44]

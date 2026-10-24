@@ -20,6 +20,8 @@ dataset:
 
 byte_accounting:
   vector_bytes: 1536
+  id_bytes: 8
+  push_vector_bytes: 1544
   summary_centers: 16
   summary_bytes: 24576
   result_item_bytes: 12
@@ -88,7 +90,7 @@ hypotheses:
     criterion: >
       Determine the break-even query rate Q per epoch where refreshing summaries finds more
       recent top-10 neighbors than spending equal bytes B on extra shard searches (1,656 bytes each)
-      or pushing new vectors to the coordinator (1,536 bytes each).
+      or pushing new vectors to the coordinator (1,544 bytes each: 1,536-byte vector + 8-byte ID).
   H3_drift_regime_sensitivity:
     criterion: >
       Test whether summary refresh provides larger gains under cluster-order arrivals (Big-ANN
