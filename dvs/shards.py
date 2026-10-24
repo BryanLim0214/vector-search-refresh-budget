@@ -19,7 +19,7 @@ import numpy as np
 from dvs.bus import DIM, SUMMARY_CENTERS, TOP_K
 from dvs.summary import ShardSummary, compute_summary_kmeans
 
-PLACEMENT_MODES = frozenset({"nearest_initial", "time_segment"})
+PLACEMENT_MODES = frozenset({"nearest_initial", "time_segment", "time_segment_g"})
 
 
 class Shard:
@@ -258,15 +258,26 @@ class ShardRouterInitializer:
         initial_centroids: np.ndarray,
         sharding_mode: str = "kmeans",
         placement_mode: str = "nearest_initial",
+        active_segments: int = 8,
     ) -> None:
         if placement_mode not in PLACEMENT_MODES:
             raise ValueError(
                 f"Unknown placement_mode '{placement_mode}'. Expected one of {sorted(PLACEMENT_MODES)}"
             )
+        if int(active_segments) <= 0:
+            raise ValueError(f"active_segments must be >= 1, got {active_segments}")
         self.num_shards = int(num_shards)
         self.initial_centroids = np.ascontiguousarray(initial_centroids, dtype=np.float32)
         self.sharding_mode = sharding_mode
         self.placement_mode = str(placement_mode)
+        self.active_segments = int(active_segments)
+
+    def active_shards_for_epoch(self, epoch: int) -> np.ndarray:
+        """Return sorted active shard IDs {(G*e + j) mod S : j = 0..G-1} for `epoch`."""
+        e = int(epoch)
+        g = self.active_segments
+        s = self.num_shards
+        return np.array(sorted({(g * e + j) % s for j in range(g)}), dtype=np.int64)
 
     def assign_shards(
         self,
@@ -281,14 +292,25 @@ class ShardRouterInitializer:
         - For stream insertions (`epoch >= 0`):
           * Under `placement_mode == 'time_segment'`, assigns all inserts of epoch `e` to
             shard `e % S` (growing segment that fills by arrival time).
+          * Under `placement_mode == 'time_segment_g'`, the active shards in epoch `e` are
+            `{(G*e + j) mod S : j = 0..G-1}` where `G = active_segments`, and each insert
+            goes to the active shard whose initial center has the highest dot product.
           * Under `placement_mode == 'nearest_initial'`, assigns by `sharding_mode` ('kmeans'
             nearest initial center, or 'hash' doc_id % S).
         """
         if len(vectors) == 0:
             return np.empty(0, dtype=np.int64)
-        if epoch is not None and int(epoch) >= 0 and self.placement_mode == "time_segment":
-            target_shard = int(epoch) % self.num_shards
-            return np.full(len(vectors), target_shard, dtype=np.int64)
+        if epoch is not None and int(epoch) >= 0:
+            if self.placement_mode == "time_segment":
+                target_shard = int(epoch) % self.num_shards
+                return np.full(len(vectors), target_shard, dtype=np.int64)
+            if self.placement_mode == "time_segment_g":
+                active_shards = self.active_shards_for_epoch(int(epoch))
+                v = np.ascontiguousarray(vectors, dtype=np.float32)
+                active_centroids = self.initial_centroids[active_shards]
+                dots = v @ active_centroids.T
+                best_local = np.argmax(dots, axis=1)
+                return active_shards[best_local].astype(np.int64)
         if self.sharding_mode == "hash":
             return (np.asarray(doc_ids, dtype=np.int64) % self.num_shards).astype(np.int64)
         v = np.ascontiguousarray(vectors, dtype=np.float32)
@@ -311,6 +333,7 @@ def build_initial_shards(
     seed: int = 42,
     sharding_mode: str = "kmeans",
     placement_mode: str = "nearest_initial",
+    active_segments: int = 8,
     max_elements_per_shard: int = 120_000,
     kmeans_niter: int = 20,
     precomputed_centroids: Optional[np.ndarray] = None,
@@ -340,6 +363,7 @@ def build_initial_shards(
         initial_centroids=init_centroids,
         sharding_mode=sharding_mode,
         placement_mode=placement_mode,
+        active_segments=active_segments,
     )
     assignments = router.assign_shards(vecs, ids, epoch=-1)
 

@@ -50,6 +50,7 @@ REFRESH_POLICIES = frozenset({
 
 ALTERNATIVE_POLICIES = frozenset({
     "extra_search",
+    "extra_search_online",
     "push_vectors",
 })
 
@@ -144,6 +145,14 @@ class PolicyController:
 
         # Track unpushed streamed vectors in arrival order: list of (doc_id, shard_id, vector)
         self._unpushed_stream_buffer: List[Tuple[int, int, np.ndarray]] = []
+
+        # State for extra_search_online (no look-ahead across current/future queries)
+        self._prev_epoch_query_gaps: Optional[np.ndarray] = None
+        self._current_epoch_query_gaps: List[float] = []
+        self._current_tau_e: float = -np.inf
+        self._online_extra_allowed: int = 0
+        self._online_extra_used: int = 0
+        self._online_extra_shards_per_query: Dict[int, List[int]] = {}
 
     def summaries_per_epoch(self, num_sample_queries: int = SAMPLE_QUERIES_COUNT) -> int:
         """Return k, the number of summaries this rule can send per epoch at budget B after its own overhead."""
@@ -339,6 +348,99 @@ class PolicyController:
 
         return extra_per_q, len(selected)
 
+    def start_online_epoch(
+        self,
+        epoch: int,
+        coordinator: Coordinator,
+        sample_queries: np.ndarray,
+    ) -> float:
+        """Initialize per-epoch threshold tau_e and budget counter for extra_search_online.
+
+        tau_e is the n_e-th smallest gap s_(m) - s_(m+1) among the previous epoch's test queries,
+        where n_e is the number of extra searches the budget allows; for epoch 0 use the 64 sample
+        queries' gaps. Never reads current or future test queries.
+        """
+        n_e = self.budget_bytes // SHARD_SEARCH_BYTES
+        m_eff = min(self.num_shards, self.m)
+        self._online_extra_allowed = max(0, int(n_e))
+        self._online_extra_used = 0
+        self._current_epoch_query_gaps = []
+        self._online_extra_shards_per_query = {}
+
+        if n_e <= 0 or m_eff >= self.num_shards:
+            self._current_tau_e = -np.inf
+            return self._current_tau_e
+
+        if int(epoch) == 0 or self._prev_epoch_query_gaps is None:
+            if len(sample_queries) == 0:
+                self._current_tau_e = -np.inf
+                return self._current_tau_e
+            _, _, sample_ranked_scores = coordinator.route_queries(sample_queries, m=self.m)
+            ref_gaps = (
+                sample_ranked_scores[:, m_eff - 1] - sample_ranked_scores[:, m_eff]
+            ).astype(np.float64)
+        else:
+            ref_gaps = np.asarray(self._prev_epoch_query_gaps, dtype=np.float64)
+
+        if len(ref_gaps) == 0:
+            self._current_tau_e = -np.inf
+            return self._current_tau_e
+
+        sorted_gaps = np.sort(ref_gaps)
+        idx = min(int(n_e), len(sorted_gaps)) - 1
+        self._current_tau_e = float(sorted_gaps[idx])
+        return self._current_tau_e
+
+    def decide_extra_search_online_query(
+        self,
+        q_idx: int,
+        query_vec: np.ndarray,
+        coordinator: Coordinator,
+        ranked_shards: Optional[np.ndarray] = None,
+        ranked_scores: Optional[np.ndarray] = None,
+    ) -> List[int]:
+        """Decide online for a single arriving query whether to grant 1 extra shard search.
+
+        Only inspects `query_vec` (a single query of shape (DIM,)). A query gets one extra
+        shard search on shard s_(m+1) if its gap s_(m) - s_(m+1) <= tau_e and budget remains
+        this epoch. Records the query's gap for the next epoch's tau_{e+1}.
+        """
+        m_eff = min(self.num_shards, self.m)
+        if m_eff >= self.num_shards:
+            return []
+
+        if ranked_shards is None or ranked_scores is None:
+            q_1d = np.ascontiguousarray(query_vec, dtype=np.float32).reshape(1, -1)
+            _, r_shards, r_scores = coordinator.route_queries(q_1d, m=self.m)
+            ranked_shards_1d = r_shards[0]
+            ranked_scores_1d = r_scores[0]
+        else:
+            ranked_shards_1d = ranked_shards
+            ranked_scores_1d = ranked_scores
+
+        gap = float(ranked_scores_1d[m_eff - 1] - ranked_scores_1d[m_eff])
+        self._current_epoch_query_gaps.append(gap)
+
+        if self._online_extra_used < self._online_extra_allowed and gap <= self._current_tau_e:
+            self._online_extra_used += 1
+            extra_sid = int(ranked_shards_1d[m_eff])
+            self._online_extra_shards_per_query[int(q_idx)] = [extra_sid]
+            return [extra_sid]
+        return []
+
+    def finish_online_epoch(
+        self,
+        decision: Optional[PolicyEpochDecision] = None,
+    ) -> Tuple[Dict[int, List[int]], int]:
+        """Finalize the epoch's online extra-search state and store gaps for the next epoch."""
+        self._prev_epoch_query_gaps = np.asarray(self._current_epoch_query_gaps, dtype=np.float64)
+        extra_map = dict(self._online_extra_shards_per_query)
+        count = int(self._online_extra_used)
+        if decision is not None:
+            decision.extra_shards_per_query = extra_map
+            decision.num_extra_searches = count
+        return extra_map, count
+
     def step_epoch(
         self,
         epoch: int,
@@ -365,6 +467,20 @@ class PolicyController:
             extra_map, count = self.plan_extra_searches(epoch_test_queries, coordinator)
             decision.extra_shards_per_query = extra_map
             decision.num_extra_searches = count
+            return decision
+
+        if self.policy == "extra_search_online":
+            if epoch_test_queries is not None:
+                raise ValueError(
+                    "epoch_test_queries must NOT be provided to step_epoch for policy='extra_search_online'"
+                )
+            self.start_online_epoch(
+                epoch=epoch,
+                coordinator=coordinator,
+                sample_queries=sample_queries,
+            )
+            decision.extra_shards_per_query = {}
+            decision.num_extra_searches = 0
             return decision
 
         if self.policy == "push_vectors":

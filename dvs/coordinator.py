@@ -11,7 +11,7 @@ Matches proposal/proposal.tex Section 4 and audit/AGY_TASK_B1_build.md:
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -221,18 +221,90 @@ class Coordinator:
         extra_shards_per_query: Optional[Dict[int, List[int]]] = None,
         record_popularity: bool = True,
         override_top_m_shards: Optional[np.ndarray] = None,
+        online_controller: Optional[Any] = None,
+        online_decision: Optional[Any] = None,
     ) -> Tuple[List[np.ndarray], List[np.ndarray], np.ndarray]:
         """Execute a batch of test queries across top-m routed shards (plus any extra shards).
 
         Logs workload query bytes on `self.bus` for the base top-m shards and budgeted
-        `extra_search` bytes for any `extra_shards_per_query`. Also searches locally pushed
-        vectors at the coordinator (if any) without additional query network bytes.
+        `extra_search` bytes for any `extra_shards_per_query` (or per-query online decisions
+        when `online_controller` is provided). Also searches locally pushed vectors at the
+        coordinator (if any) without additional query network bytes.
 
         Returns:
             results_ids: list of length Q of top-k doc_id arrays
             results_scores: list of length Q of top-k score arrays
             searched_shards_mask: boolean array of shape (Q, S) indicating which shards were searched
         """
+        if online_controller is not None:
+            num_q = len(queries)
+            m_eff = min(self.num_shards, self.m if m is None else int(m))
+            p_vecs = self.pushed_vectors
+            p_ids = self.pushed_ids
+            has_pushed = len(p_vecs) > 0
+
+            results_ids: List[np.ndarray] = []
+            results_scores: List[np.ndarray] = []
+            searched_mask = np.zeros((num_q, self.num_shards), dtype=bool)
+
+            for q_idx in range(num_q):
+                q_vec = np.ascontiguousarray(queries[q_idx], dtype=np.float32).reshape(DIM)
+                top_m_q, ranked_shards_q, ranked_scores_q = self.route_queries(
+                    q_vec.reshape(1, DIM), m=m_eff
+                )
+                if record_popularity and m_eff > 0:
+                    counts = np.bincount(top_m_q[0], minlength=self.num_shards)
+                    self.past_top_m_counts += counts
+
+                extra_sids = online_controller.decide_extra_search_online_query(
+                    q_idx=q_idx,
+                    query_vec=q_vec,
+                    coordinator=self,
+                    ranked_shards=ranked_shards_q[0],
+                    ranked_scores=ranked_scores_q[0],
+                )
+
+                cand_ids: List[np.ndarray] = []
+                cand_scores: List[np.ndarray] = []
+                for s_id in top_m_q[0]:
+                    s_int = int(s_id)
+                    searched_mask[q_idx, s_int] = True
+                    self.bus.log_query_search(epoch=epoch, shard_id=s_int, query_idx=q_idx)
+                    ids_s, scores_s = shards[s_int].search(
+                        q_vec, k=self.k, exact=self.exact_local_search
+                    )
+                    cand_ids.append(ids_s)
+                    cand_scores.append(scores_s)
+
+                for extra_sid in extra_sids:
+                    s_int = int(extra_sid)
+                    if not searched_mask[q_idx, s_int]:
+                        searched_mask[q_idx, s_int] = True
+                        self.bus.log_extra_search(epoch=epoch, shard_id=s_int, query_idx=q_idx)
+                        ids_s, scores_s = shards[s_int].search(
+                            q_vec, k=self.k, exact=self.exact_local_search
+                        )
+                        cand_ids.append(ids_s)
+                        cand_scores.append(scores_s)
+
+                if has_pushed:
+                    scores_p = (p_vecs @ q_vec).astype(np.float32)
+                    k_p = min(self.k, len(scores_p))
+                    if k_p == len(scores_p):
+                        top_p = np.argsort(-scores_p, kind="mergesort")
+                    else:
+                        part = np.argpartition(-scores_p, k_p - 1)[:k_p]
+                        top_p = part[np.argsort(-scores_p[part], kind="mergesort")]
+                    cand_ids.append(p_ids[top_p])
+                    cand_scores.append(scores_p[top_p])
+
+                merged_ids, merged_scores = self.merge_candidates(cand_ids, cand_scores, k=self.k)
+                results_ids.append(merged_ids)
+                results_scores.append(merged_scores)
+
+            online_controller.finish_online_epoch(online_decision)
+            return results_ids, results_scores, searched_mask
+
         q_arr = np.ascontiguousarray(queries, dtype=np.float32)
         num_q = q_arr.shape[0]
         m_eff = min(self.num_shards, self.m if m is None else int(m))

@@ -101,10 +101,16 @@ def make_gt_cache_key(
     seed: int,
     n_init: int,
     n_stream: int,
+    active_segments: Optional[int] = None,
 ) -> str:
     """Return a deterministic string key identifying the ground-truth trajectory."""
+    if placement_mode == "time_segment_g":
+        eff_g = 8 if active_segments is None else int(active_segments)
+        placement_tag = f"{placement_mode}_G{eff_g}"
+    else:
+        placement_tag = placement_mode
     return (
-        f"gt_{stream_mode}_{placement_mode}_{sharding_mode}"
+        f"gt_{stream_mode}_{placement_tag}_{sharding_mode}"
         f"_S{int(num_shards)}_E{int(num_epochs)}_I{int(inserts_per_epoch)}"
         f"_Q{int(queries_per_epoch)}_bursts{int(bool(bursts))}"
         f"_init{int(n_init)}_stream{int(n_stream)}_seed{int(seed)}"
@@ -127,6 +133,7 @@ def build_ground_truth_cache(
     bursts: bool = False,
     sharding_mode: str = "kmeans",
     placement_mode: str = "nearest_initial",
+    active_segments: Optional[int] = None,
     seed: int = 42,
     kmeans_niter: int = 20,
     cache_key: Optional[str] = None,
@@ -145,6 +152,7 @@ def build_ground_truth_cache(
             seed=seed,
             n_init=len(initial_vectors),
             n_stream=len(stream_vectors),
+            active_segments=active_segments,
         )
 
     new_topic_stats: Optional[Dict[str, Any]] = None
@@ -179,11 +187,13 @@ def build_ground_truth_cache(
     km.train(vecs)
     init_centroids = np.ascontiguousarray(km.centroids, dtype=np.float32)
 
+    eff_active_segments = 8 if active_segments is None else int(active_segments)
     router = ShardRouterInitializer(
         num_shards=num_shards,
         initial_centroids=init_centroids,
         sharding_mode=sharding_mode,
         placement_mode=placement_mode,
+        active_segments=eff_active_segments,
     )
     init_shard_assignments = router.assign_shards(vecs, ids, epoch=-1)
 
@@ -390,6 +400,7 @@ def run_single_simulation(
     bursts: bool = False,
     sharding_mode: str = "kmeans",
     placement_mode: str = "nearest_initial",
+    active_segments: Optional[int] = None,
     seed: int = 42,
     exact_local_search: bool = False,
     charge_setup_to_budget: bool = False,
@@ -447,6 +458,7 @@ def run_single_simulation(
     bus = ByteBus(num_shards=num_shards, num_epochs=num_epochs)
 
     # 1. Build initial shards and ground-truth index at setup (epoch -1)
+    eff_active_segments = 8 if active_segments is None else int(active_segments)
     max_elems = len(initial_vectors) + max(num_epochs * inserts_per_epoch, len(stream_vectors)) + 1024
     shards, router = build_initial_shards(
         initial_vectors=initial_vectors,
@@ -459,6 +471,7 @@ def run_single_simulation(
         seed=seed,
         sharding_mode=sharding_mode,
         placement_mode=placement_mode,
+        active_segments=eff_active_segments,
         max_elements_per_shard=max_elems,
         precomputed_centroids=cached_gt.init_centroids if cached_gt is not None else None,
     )
@@ -637,6 +650,8 @@ def run_single_simulation(
                 extra_shards_per_query=decision.extra_shards_per_query,
                 record_popularity=True,
                 override_top_m_shards=oracle_top_m,
+                online_controller=controller if policy == "extra_search_online" else None,
+                online_decision=decision if policy == "extra_search_online" else None,
             )
 
         # Evaluate accuracy and byte accounting
@@ -859,6 +874,9 @@ def run_single_simulation(
         "exact_local_search": exact_local_search,
         "charge_setup_to_budget": charge_setup_to_budget,
     }
+    if active_segments is not None or placement_mode == "time_segment_g":
+        summary["active_segments"] = int(eff_active_segments)
+        cfg_dict["active_segments"] = int(eff_active_segments)
     return SimulationRunResult(
         run_id=run_id,
         config=cfg_dict,
@@ -987,6 +1005,7 @@ def _worker_build_gt_task(task: Dict[str, Any]) -> Dict[str, Any]:
             bursts=bool(task["bursts"]),
             sharding_mode=str(task["sharding_mode"]),
             placement_mode=str(task["placement_mode"]),
+            active_segments=task.get("active_segments"),
             seed=int(task["seed"]),
             cache_key=str(task["cache_key"]),
         )
@@ -1053,6 +1072,7 @@ def _worker_run_sim_task(task: Dict[str, Any]) -> Dict[str, Any]:
             bursts=bool(task["bursts"]),
             sharding_mode=str(task["sharding_mode"]),
             placement_mode=str(task["placement_mode"]),
+            active_segments=task.get("active_segments"),
             seed=int(task["seed"]),
             exact_local_search=bool(task["exact_local_search"]),
             charge_setup_to_budget=bool(task["charge_setup_to_budget"]),
@@ -1184,6 +1204,11 @@ def run_from_config(
     else:
         default_cap_epochs = int(raw_cap)
 
+    raw_active_segments = cfg.get("active_segments", None)
+    default_active_segments: Optional[int] = (
+        int(raw_active_segments) if raw_active_segments is not None else None
+    )
+
     # Support either explicit single-factor condition dicts or sweep lists over condition flags
     raw_conditions = cfg.get("conditions")
     if isinstance(raw_conditions, list) and len(raw_conditions) > 0:
@@ -1194,6 +1219,8 @@ def run_from_config(
                 parsed_cap: Optional[int] = None
             else:
                 parsed_cap = int(cond_cap)
+            cond_g = cond.get("active_segments", default_active_segments)
+            parsed_g: Optional[int] = int(cond_g) if cond_g is not None else None
             condition_specs.append(
                 {
                     "recent_window_w": int(cond.get("recent_window_w", cfg.get("recent_window_w", 2))),
@@ -1202,6 +1229,7 @@ def run_from_config(
                     "placement_mode": str(
                         cond.get("placement_mode", cfg.get("placement_mode", "nearest_initial"))
                     ),
+                    "active_segments": parsed_g,
                     "charge_setup_to_budget": bool(
                         cond.get("charge_setup_to_budget", cfg.get("charge_setup_to_budget", False))
                     ),
@@ -1222,6 +1250,7 @@ def run_from_config(
                 "bursts": b_val,
                 "sharding_mode": sh_val,
                 "placement_mode": pl_val,
+                "active_segments": default_active_segments,
                 "charge_setup_to_budget": cs_val,
                 "aging_mode": ag_val,
                 "starvation_cap_epochs": default_cap_epochs,
@@ -1246,6 +1275,7 @@ def run_from_config(
         bursts = cond["bursts"]
         sharding_mode = cond["sharding_mode"]
         placement_mode = cond["placement_mode"]
+        active_segments = cond["active_segments"]
         charge_setup_to_budget = cond["charge_setup_to_budget"]
         aging_mode = cond["aging_mode"]
         starvation_cap_epochs = cond["starvation_cap_epochs"]
@@ -1268,6 +1298,7 @@ def run_from_config(
                                     seed=int(seed),
                                     n_init=n_init,
                                     n_stream=n_stream,
+                                    active_segments=active_segments,
                                 )
                                 gt_cache_path = gt_cache_dir / f"{gt_key}.npz" if use_gt_cache else None
                                 if use_gt_cache and gt_key not in gt_tasks_by_key:
@@ -1282,6 +1313,7 @@ def run_from_config(
                                         "bursts": bursts,
                                         "sharding_mode": sharding_mode,
                                         "placement_mode": placement_mode,
+                                        "active_segments": active_segments,
                                         "seed": int(seed),
                                     }
 
@@ -1319,6 +1351,7 @@ def run_from_config(
                                             "bursts": bursts,
                                             "sharding_mode": sharding_mode,
                                             "placement_mode": placement_mode,
+                                            "active_segments": active_segments,
                                             "seed": int(seed),
                                             "exact_local_search": exact_local_search,
                                             "charge_setup_to_budget": charge_setup_to_budget,
