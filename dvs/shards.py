@@ -313,23 +313,27 @@ def build_initial_shards(
     placement_mode: str = "nearest_initial",
     max_elements_per_shard: int = 120_000,
     kmeans_niter: int = 20,
+    precomputed_centroids: Optional[np.ndarray] = None,
 ) -> Tuple[List[Shard], ShardRouterInitializer]:
     """Partition `initial_vectors` into `num_shards` shards and initialize each shard's HNSW index."""
     vecs = np.ascontiguousarray(initial_vectors, dtype=np.float32)
     ids = np.ascontiguousarray(initial_ids, dtype=np.int64)
 
-    km = faiss.Kmeans(
-        d=DIM,
-        k=int(num_shards),
-        niter=int(kmeans_niter),
-        seed=int(seed),
-        spherical=True,
-        verbose=False,
-        min_points_per_centroid=1,
-        max_points_per_centroid=max(len(vecs), 100000),
-    )
-    km.train(vecs)
-    init_centroids = np.ascontiguousarray(km.centroids, dtype=np.float32)
+    if precomputed_centroids is not None:
+        init_centroids = np.ascontiguousarray(precomputed_centroids, dtype=np.float32)
+    else:
+        km = faiss.Kmeans(
+            d=DIM,
+            k=int(num_shards),
+            niter=int(kmeans_niter),
+            seed=int(seed),
+            spherical=True,
+            verbose=False,
+            min_points_per_centroid=1,
+            max_points_per_centroid=max(len(vecs), 100000),
+        )
+        km.train(vecs)
+        init_centroids = np.ascontiguousarray(km.centroids, dtype=np.float32)
 
     router = ShardRouterInitializer(
         num_shards=num_shards,

@@ -12,19 +12,24 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import multiprocessing as mp
 import os
 import platform
 import subprocess
+import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import faiss
 import numpy as np
 import pandas as pd
 import yaml
 
 from dvs.bus import (
     ByteBus,
+    DIM,
     SETUP_SAMPLE_VECTORS_PER_SHARD_BYTES,
     SUMMARY_BYTES,
     SUMMARY_CENTERS,
@@ -46,12 +51,260 @@ from dvs.policies import (
     STARVATION_CAP_EPOCHS,
     PolicyController,
 )
-from dvs.shards import build_initial_shards
+from dvs.shards import ShardRouterInitializer, build_initial_shards
 from dvs.streams import (
     build_epoch_schedule,
     compute_new_topic_query_stats,
     partition_new_topic_stream,
 )
+
+
+def set_single_thread_env() -> None:
+    """Pin FAISS, OpenMP, MKL, and OpenBLAS to 1 thread per worker process."""
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    faiss.omp_set_num_threads(1)
+    try:
+        import threadpoolctl
+
+        threadpoolctl.threadpool_limits(limits=1)
+    except Exception:
+        pass
+
+
+@dataclass
+class CachedGroundTruth:
+    """Precomputed exact ground truth per epoch for a (stream, placement, seed, Q schedule)."""
+
+    cache_key: str
+    epoch_gt_ids: List[np.ndarray]
+    epoch_gt_scores: List[np.ndarray]
+    epoch_gt_epochs: List[np.ndarray]
+    epoch_gt_shards: List[np.ndarray]
+    epoch_total_indexed: List[int]
+    epoch_cpu_gt_s: List[float]
+    init_centroids: Optional[np.ndarray] = None
+    new_topic_stats: Optional[Dict[str, Any]] = None
+
+
+def make_gt_cache_key(
+    stream_mode: str,
+    placement_mode: str,
+    sharding_mode: str,
+    num_shards: int,
+    num_epochs: int,
+    inserts_per_epoch: int,
+    queries_per_epoch: int,
+    bursts: bool,
+    seed: int,
+    n_init: int,
+    n_stream: int,
+) -> str:
+    """Return a deterministic string key identifying the ground-truth trajectory."""
+    return (
+        f"gt_{stream_mode}_{placement_mode}_{sharding_mode}"
+        f"_S{int(num_shards)}_E{int(num_epochs)}_I{int(inserts_per_epoch)}"
+        f"_Q{int(queries_per_epoch)}_bursts{int(bool(bursts))}"
+        f"_init{int(n_init)}_stream{int(n_stream)}_seed{int(seed)}"
+    )
+
+
+def build_ground_truth_cache(
+    initial_vectors: np.ndarray,
+    initial_ids: np.ndarray,
+    stream_vectors: np.ndarray,
+    stream_ids: np.ndarray,
+    test_queries: np.ndarray,
+    test_query_ids: np.ndarray,
+    sample_queries: np.ndarray,
+    num_shards: int = 32,
+    num_epochs: int = 50,
+    inserts_per_epoch: int = 1000,
+    queries_per_epoch: int = 200,
+    stream_mode: str = "steady",
+    bursts: bool = False,
+    sharding_mode: str = "kmeans",
+    placement_mode: str = "nearest_initial",
+    seed: int = 42,
+    kmeans_niter: int = 20,
+    cache_key: Optional[str] = None,
+) -> CachedGroundTruth:
+    """Compute exact ground truth across all epochs for a (stream, placement, seed, Q schedule)."""
+    if cache_key is None:
+        cache_key = make_gt_cache_key(
+            stream_mode=stream_mode,
+            placement_mode=placement_mode,
+            sharding_mode=sharding_mode,
+            num_shards=num_shards,
+            num_epochs=num_epochs,
+            inserts_per_epoch=inserts_per_epoch,
+            queries_per_epoch=queries_per_epoch,
+            bursts=bursts,
+            seed=seed,
+            n_init=len(initial_vectors),
+            n_stream=len(stream_vectors),
+        )
+
+    new_topic_stats: Optional[Dict[str, Any]] = None
+    if stream_mode == "new_topic":
+        initial_vectors, initial_ids, stream_vectors, stream_ids = partition_new_topic_stream(
+            initial_vectors=initial_vectors,
+            initial_ids=initial_ids,
+            stream_vectors=stream_vectors,
+            stream_ids=stream_ids,
+            seed=seed,
+        )
+        new_topic_stats = compute_new_topic_query_stats(
+            initial_vectors=initial_vectors,
+            stream_vectors=stream_vectors,
+            test_queries=test_queries,
+            k=TOP_K,
+        )
+
+    vecs = np.ascontiguousarray(initial_vectors, dtype=np.float32)
+    ids = np.ascontiguousarray(initial_ids, dtype=np.int64)
+
+    km = faiss.Kmeans(
+        d=DIM,
+        k=int(num_shards),
+        niter=int(kmeans_niter),
+        seed=int(seed),
+        spherical=True,
+        verbose=False,
+        min_points_per_centroid=1,
+        max_points_per_centroid=max(len(vecs), 100000),
+    )
+    km.train(vecs)
+    init_centroids = np.ascontiguousarray(km.centroids, dtype=np.float32)
+
+    router = ShardRouterInitializer(
+        num_shards=num_shards,
+        initial_centroids=init_centroids,
+        sharding_mode=sharding_mode,
+        placement_mode=placement_mode,
+    )
+    init_shard_assignments = router.assign_shards(vecs, ids, epoch=-1)
+
+    gt = GroundTruthIndex()
+    gt.add(
+        vectors=vecs,
+        doc_ids=ids,
+        shard_ids=init_shard_assignments,
+        epoch=-1,
+    )
+
+    schedule = build_epoch_schedule(
+        stream_vectors=stream_vectors,
+        stream_ids=stream_ids,
+        test_queries=test_queries,
+        test_query_ids=test_query_ids,
+        sample_queries=sample_queries,
+        stream_mode=stream_mode,
+        num_epochs=num_epochs,
+        inserts_per_epoch=inserts_per_epoch,
+        queries_per_epoch=queries_per_epoch,
+        seed=seed,
+        bursts=bursts,
+    )
+
+    epoch_gt_ids: List[np.ndarray] = []
+    epoch_gt_scores: List[np.ndarray] = []
+    epoch_gt_epochs: List[np.ndarray] = []
+    epoch_gt_shards: List[np.ndarray] = []
+    epoch_total_indexed: List[int] = []
+    epoch_cpu_gt_s: List[float] = []
+
+    for batch in schedule:
+        epoch = batch.epoch
+        new_shard_ids: Optional[np.ndarray] = None
+        if len(batch.insert_vectors) > 0:
+            new_shard_ids = router.assign_shards(
+                batch.insert_vectors,
+                batch.insert_ids,
+                epoch=epoch,
+            )
+        t0 = time.process_time()
+        if len(batch.insert_vectors) > 0 and new_shard_ids is not None:
+            gt.add(
+                vectors=batch.insert_vectors,
+                doc_ids=batch.insert_ids,
+                shard_ids=new_shard_ids,
+                epoch=epoch,
+            )
+        gt_ids, gt_scores, gt_epochs, gt_shards = gt.search(batch.test_queries, k=TOP_K)
+        t1 = time.process_time()
+
+        epoch_gt_ids.append(gt_ids)
+        epoch_gt_scores.append(gt_scores)
+        epoch_gt_epochs.append(gt_epochs)
+        epoch_gt_shards.append(gt_shards)
+        epoch_total_indexed.append(int(gt.size))
+        epoch_cpu_gt_s.append(max(0.0, t1 - t0))
+
+    return CachedGroundTruth(
+        cache_key=cache_key,
+        epoch_gt_ids=epoch_gt_ids,
+        epoch_gt_scores=epoch_gt_scores,
+        epoch_gt_epochs=epoch_gt_epochs,
+        epoch_gt_shards=epoch_gt_shards,
+        epoch_total_indexed=epoch_total_indexed,
+        epoch_cpu_gt_s=epoch_cpu_gt_s,
+        init_centroids=init_centroids,
+        new_topic_stats=new_topic_stats,
+    )
+
+
+def save_ground_truth_cache(gt_cache: CachedGroundTruth, path: Path) -> None:
+    """Serialize `CachedGroundTruth` to an `.npz` file on disk."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nt_json = json.dumps(gt_cache.new_topic_stats) if gt_cache.new_topic_stats is not None else ""
+    init_c = (
+        gt_cache.init_centroids
+        if gt_cache.init_centroids is not None
+        else np.empty((0, DIM), dtype=np.float32)
+    )
+    np.savez_compressed(
+        path,
+        cache_key=np.array(gt_cache.cache_key),
+        epoch_gt_ids=np.stack(gt_cache.epoch_gt_ids, axis=0),
+        epoch_gt_scores=np.stack(gt_cache.epoch_gt_scores, axis=0),
+        epoch_gt_epochs=np.stack(gt_cache.epoch_gt_epochs, axis=0),
+        epoch_gt_shards=np.stack(gt_cache.epoch_gt_shards, axis=0),
+        epoch_total_indexed=np.asarray(gt_cache.epoch_total_indexed, dtype=np.int64),
+        epoch_cpu_gt_s=np.asarray(gt_cache.epoch_cpu_gt_s, dtype=np.float64),
+        init_centroids=np.ascontiguousarray(init_c, dtype=np.float32),
+        new_topic_stats_json=np.array(nt_json),
+    )
+
+
+def load_ground_truth_cache(path: Path) -> CachedGroundTruth:
+    """Deserialize `CachedGroundTruth` from an `.npz` file on disk."""
+    with np.load(path, allow_pickle=False) as data:
+        cache_key = str(data["cache_key"].item())
+        ids_arr = data["epoch_gt_ids"]
+        scores_arr = data["epoch_gt_scores"]
+        epochs_arr = data["epoch_gt_epochs"]
+        shards_arr = data["epoch_gt_shards"]
+        total_idx = data["epoch_total_indexed"].astype(np.int64).tolist()
+        cpu_gt = data["epoch_cpu_gt_s"].astype(np.float64).tolist()
+        init_c_raw = data["init_centroids"] if "init_centroids" in data else np.empty((0, DIM), dtype=np.float32)
+        init_c = init_c_raw.copy() if len(init_c_raw) > 0 else None
+        nt_json = str(data["new_topic_stats_json"].item()) if "new_topic_stats_json" in data else ""
+        nt_stats = json.loads(nt_json) if nt_json else None
+        num_ep = ids_arr.shape[0]
+        return CachedGroundTruth(
+            cache_key=cache_key,
+            epoch_gt_ids=[ids_arr[e].copy() for e in range(num_ep)],
+            epoch_gt_scores=[scores_arr[e].copy() for e in range(num_ep)],
+            epoch_gt_epochs=[epochs_arr[e].copy() for e in range(num_ep)],
+            epoch_gt_shards=[shards_arr[e].copy() for e in range(num_ep)],
+            epoch_total_indexed=[int(x) for x in total_idx],
+            epoch_cpu_gt_s=[float(x) for x in cpu_gt],
+            init_centroids=init_c,
+            new_topic_stats=nt_stats,
+        )
 
 
 @dataclass
@@ -146,6 +399,8 @@ def run_single_simulation(
     ef_construction: int = 200,
     ef_search: int = 100,
     run_id: str = "run",
+    cached_gt: Optional[CachedGroundTruth] = None,
+    precomputed_new_topic_partition: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = None,
 ) -> SimulationRunResult:
     """Run one complete streaming simulation for a single policy and seed."""
     # Strict leakage assertion before simulation begins
@@ -162,19 +417,25 @@ def run_single_simulation(
 
     new_topic_stats: Optional[Dict[str, Any]] = None
     if stream_mode == "new_topic":
-        initial_vectors, initial_ids, stream_vectors, stream_ids = partition_new_topic_stream(
-            initial_vectors=initial_vectors,
-            initial_ids=initial_ids,
-            stream_vectors=stream_vectors,
-            stream_ids=stream_ids,
-            seed=seed,
-        )
-        new_topic_stats = compute_new_topic_query_stats(
-            initial_vectors=initial_vectors,
-            stream_vectors=stream_vectors,
-            test_queries=test_queries,
-            k=TOP_K,
-        )
+        if precomputed_new_topic_partition is not None:
+            initial_vectors, initial_ids, stream_vectors, stream_ids = precomputed_new_topic_partition
+        else:
+            initial_vectors, initial_ids, stream_vectors, stream_ids = partition_new_topic_stream(
+                initial_vectors=initial_vectors,
+                initial_ids=initial_ids,
+                stream_vectors=stream_vectors,
+                stream_ids=stream_ids,
+                seed=seed,
+            )
+        if cached_gt is not None and cached_gt.new_topic_stats is not None:
+            new_topic_stats = cached_gt.new_topic_stats
+        else:
+            new_topic_stats = compute_new_topic_query_stats(
+                initial_vectors=initial_vectors,
+                stream_vectors=stream_vectors,
+                test_queries=test_queries,
+                k=TOP_K,
+            )
 
     budget_bytes = (
         int(budget_bytes_override)
@@ -199,6 +460,7 @@ def run_single_simulation(
         sharding_mode=sharding_mode,
         placement_mode=placement_mode,
         max_elements_per_shard=max_elems,
+        precomputed_centroids=cached_gt.init_centroids if cached_gt is not None else None,
     )
     bus.log_setup_initial_summaries(num_shards=num_shards, c=c)
 
@@ -211,14 +473,16 @@ def run_single_simulation(
             num_sample_queries=len(sample_queries),
         )
 
-    gt = GroundTruthIndex()
-    init_shard_assignments = router.assign_shards(initial_vectors, initial_ids, epoch=-1)
-    gt.add(
-        vectors=initial_vectors,
-        doc_ids=initial_ids,
-        shard_ids=init_shard_assignments,
-        epoch=-1,
-    )
+    gt: Optional[GroundTruthIndex] = None
+    if cached_gt is None:
+        gt = GroundTruthIndex()
+        init_shard_assignments = router.assign_shards(initial_vectors, initial_ids, epoch=-1)
+        gt.add(
+            vectors=initial_vectors,
+            doc_ids=initial_ids,
+            shard_ids=init_shard_assignments,
+            epoch=-1,
+        )
 
     coordinator = Coordinator(
         shards=shards,
@@ -287,15 +551,24 @@ def run_single_simulation(
                 )
 
         # Ground-truth index update and exact search (timed separately, excluded from method CPU)
-        with timer.measure("ground_truth"):
-            if len(batch.insert_vectors) > 0 and new_shard_ids is not None:
-                gt.add(
-                    vectors=batch.insert_vectors,
-                    doc_ids=batch.insert_ids,
-                    shard_ids=new_shard_ids,
-                    epoch=epoch,
-                )
-            gt_ids, _, gt_epochs, gt_shards = gt.search(batch.test_queries, k=TOP_K)
+        if cached_gt is not None:
+            gt_ids = cached_gt.epoch_gt_ids[epoch]
+            gt_epochs = cached_gt.epoch_gt_epochs[epoch]
+            gt_shards = cached_gt.epoch_gt_shards[epoch]
+            total_indexed_vectors = int(cached_gt.epoch_total_indexed[epoch])
+            timer.times["ground_truth"] += float(cached_gt.epoch_cpu_gt_s[epoch])
+        else:
+            assert gt is not None
+            with timer.measure("ground_truth"):
+                if len(batch.insert_vectors) > 0 and new_shard_ids is not None:
+                    gt.add(
+                        vectors=batch.insert_vectors,
+                        doc_ids=batch.insert_ids,
+                        shard_ids=new_shard_ids,
+                        epoch=epoch,
+                    )
+                gt_ids, _, gt_epochs, gt_shards = gt.search(batch.test_queries, k=TOP_K)
+            total_indexed_vectors = gt.size
 
         # Step B: Update candidate summaries on shards (timed under summary component)
         with timer.measure("summary"):
@@ -415,7 +688,7 @@ def run_single_simulation(
             "budget_bytes": budget_bytes,
             "queries_per_epoch": len(batch.test_queries),
             "inserts_this_epoch": len(batch.insert_vectors),
-            "total_indexed_vectors": gt.size,
+            "total_indexed_vectors": total_indexed_vectors,
             "recall_at_10": eval_res.recall_at_10,
             "recent_recall_at_10": eval_res.recent_recall_at_10,
             "num_queries_with_recent_neighbors": eval_res.num_queries_with_recent_neighbors,
@@ -645,13 +918,220 @@ def _as_list(val: Any) -> List[Any]:
     return [val]
 
 
+_WORKER_STATE: Dict[str, Any] = {}
+
+
+def _init_pool_worker(
+    data_dir_str: str,
+    n_init: int,
+    n_stream: int,
+    repo_root_str: str,
+    config_sha256: str,
+) -> None:
+    """Initialize a worker process: pin threads to 1 and load dataset into process memory."""
+    set_single_thread_env()
+    data_dir = Path(data_dir_str)
+    repo_root = Path(repo_root_str)
+    (
+        init_vecs,
+        init_ids,
+        stream_vecs,
+        stream_ids,
+        test_q,
+        test_qids,
+        sample_q,
+        sample_qids,
+    ) = load_dataset(data_dir)
+    data_prov_path = data_dir / "PROVENANCE.json"
+    data_prov_sha = (
+        hashlib.sha256(data_prov_path.read_bytes()).hexdigest()
+        if data_prov_path.exists()
+        else None
+    )
+    _WORKER_STATE.clear()
+    _WORKER_STATE["init_vecs"] = init_vecs[:n_init]
+    _WORKER_STATE["init_ids"] = init_ids[:n_init]
+    _WORKER_STATE["stream_vecs"] = stream_vecs[:n_stream]
+    _WORKER_STATE["stream_ids"] = stream_ids[:n_stream]
+    _WORKER_STATE["test_q"] = test_q
+    _WORKER_STATE["test_qids"] = test_qids
+    _WORKER_STATE["sample_q"] = sample_q
+    _WORKER_STATE["sample_qids"] = sample_qids
+    _WORKER_STATE["git_commit"] = get_git_commit(repo_root)
+    _WORKER_STATE["package_versions"] = get_package_versions()
+    _WORKER_STATE["cpu_info"] = get_cpu_info()
+    _WORKER_STATE["data_prov_sha"] = data_prov_sha
+    _WORKER_STATE["config_sha256"] = config_sha256
+    _WORKER_STATE["gt_mem_cache"] = {}
+    _WORKER_STATE["nt_partition_cache"] = {}
+
+
+def _worker_build_gt_task(task: Dict[str, Any]) -> Dict[str, Any]:
+    """Worker entrypoint to build and persist one `CachedGroundTruth` file."""
+    set_single_thread_env()
+    gt_path = Path(task["gt_cache_path"])
+    if not gt_path.exists():
+        gt_cache = build_ground_truth_cache(
+            initial_vectors=_WORKER_STATE["init_vecs"],
+            initial_ids=_WORKER_STATE["init_ids"],
+            stream_vectors=_WORKER_STATE["stream_vecs"],
+            stream_ids=_WORKER_STATE["stream_ids"],
+            test_queries=_WORKER_STATE["test_q"],
+            test_query_ids=_WORKER_STATE["test_qids"],
+            sample_queries=_WORKER_STATE["sample_q"],
+            num_shards=int(task["num_shards"]),
+            num_epochs=int(task["num_epochs"]),
+            inserts_per_epoch=int(task["inserts_per_epoch"]),
+            queries_per_epoch=int(task["queries_per_epoch"]),
+            stream_mode=str(task["stream_mode"]),
+            bursts=bool(task["bursts"]),
+            sharding_mode=str(task["sharding_mode"]),
+            placement_mode=str(task["placement_mode"]),
+            seed=int(task["seed"]),
+            cache_key=str(task["cache_key"]),
+        )
+        tmp_path = gt_path.with_suffix(f".tmp.{os.getpid()}.npz")
+        save_ground_truth_cache(gt_cache, tmp_path)
+        tmp_path.replace(gt_path)
+    return {"cache_key": task["cache_key"], "gt_cache_path": str(gt_path)}
+
+
+def _worker_run_sim_task(task: Dict[str, Any]) -> Dict[str, Any]:
+    """Worker entrypoint to execute a single simulation run and write its output artifacts."""
+    set_single_thread_env()
+    run_id = str(task["run_id"])
+    run_dir = Path(task["run_dir"])
+    try:
+        cached_gt: Optional[CachedGroundTruth] = None
+        gt_cache_path_str = task.get("gt_cache_path")
+        if gt_cache_path_str is not None:
+            mem_cache: Dict[str, CachedGroundTruth] = _WORKER_STATE["gt_mem_cache"]
+            if gt_cache_path_str not in mem_cache:
+                # Keep at most 2 ground-truth objects in worker RAM to bound memory
+                if len(mem_cache) >= 2:
+                    mem_cache.clear()
+                mem_cache[gt_cache_path_str] = load_ground_truth_cache(Path(gt_cache_path_str))
+            cached_gt = mem_cache[gt_cache_path_str]
+
+        nt_part = None
+        if str(task["stream_mode"]) == "new_topic":
+            seed_int = int(task["seed"])
+            nt_cache: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = _WORKER_STATE[
+                "nt_partition_cache"
+            ]
+            if seed_int not in nt_cache:
+                if len(nt_cache) >= 2:
+                    nt_cache.clear()
+                nt_cache[seed_int] = partition_new_topic_stream(
+                    initial_vectors=_WORKER_STATE["init_vecs"],
+                    initial_ids=_WORKER_STATE["init_ids"],
+                    stream_vectors=_WORKER_STATE["stream_vecs"],
+                    stream_ids=_WORKER_STATE["stream_ids"],
+                    seed=seed_int,
+                )
+            nt_part = nt_cache[seed_int]
+
+        res = run_single_simulation(
+            initial_vectors=_WORKER_STATE["init_vecs"],
+            initial_ids=_WORKER_STATE["init_ids"],
+            stream_vectors=_WORKER_STATE["stream_vecs"],
+            stream_ids=_WORKER_STATE["stream_ids"],
+            test_queries=_WORKER_STATE["test_q"],
+            test_query_ids=_WORKER_STATE["test_qids"],
+            sample_queries=_WORKER_STATE["sample_q"],
+            sample_query_ids=_WORKER_STATE["sample_qids"],
+            policy=str(task["policy"]),
+            num_shards=int(task["num_shards"]),
+            c=int(task["c"]),
+            m=int(task["m"]),
+            budget_summaries=int(task["budget_summaries"]),
+            num_epochs=int(task["num_epochs"]),
+            inserts_per_epoch=int(task["inserts_per_epoch"]),
+            queries_per_epoch=int(task["queries_per_epoch"]),
+            recent_window_w=int(task["recent_window_w"]),
+            stream_mode=str(task["stream_mode"]),
+            bursts=bool(task["bursts"]),
+            sharding_mode=str(task["sharding_mode"]),
+            placement_mode=str(task["placement_mode"]),
+            seed=int(task["seed"]),
+            exact_local_search=bool(task["exact_local_search"]),
+            charge_setup_to_budget=bool(task["charge_setup_to_budget"]),
+            aging_mode=str(task["aging_mode"]),
+            starvation_cap_epochs=task["starvation_cap_epochs"],
+            run_id=run_id,
+            cached_gt=cached_gt,
+            precomputed_new_topic_partition=nt_part,
+        )
+
+        run_dir.mkdir(parents=True, exist_ok=True)
+        res.epochs_df.to_parquet(run_dir / "epochs.parquet", index=False)
+        np.savez_compressed(
+            run_dir / "queries.npz",
+            recall_at_10=res.all_query_recall.astype(np.float32),
+            recent_recall_at_10=res.all_query_recent_recall.astype(np.float32),
+            missed_neighbors=res.all_query_missed_neighbors.astype(np.int16),
+        )
+        with (run_dir / "summary.json").open("w", encoding="utf-8") as f:
+            json.dump(res.summary, f, indent=2)
+
+        prov = {
+            "run_id": res.run_id,
+            "git_commit": _WORKER_STATE["git_commit"],
+            "config_sha256": _WORKER_STATE["config_sha256"],
+            "data_provenance_sha256": _WORKER_STATE["data_prov_sha"],
+            "package_versions": _WORKER_STATE["package_versions"],
+            "cpu_info": _WORKER_STATE["cpu_info"],
+            "config": res.config,
+        }
+        with (run_dir / "provenance.json").open("w", encoding="utf-8") as f:
+            json.dump(prov, f, indent=2)
+
+        return {
+            "status": "ok",
+            "run_id": run_id,
+            "run_dir": str(run_dir),
+            "config": res.config,
+            "summary": res.summary,
+        }
+    except Exception:
+        return {
+            "status": "error",
+            "run_id": run_id,
+            "run_dir": str(run_dir),
+            "error": traceback.format_exc(),
+            "task": task,
+        }
+
+
+def _load_saved_run_result(run_dir: Path, config: Dict[str, Any], summary: Dict[str, Any]) -> SimulationRunResult:
+    """Reconstruct `SimulationRunResult` from saved artifacts on disk."""
+    epochs_df = pd.read_parquet(run_dir / "epochs.parquet")
+    with np.load(run_dir / "queries.npz", allow_pickle=False) as qz:
+        q_recall = qz["recall_at_10"].astype(np.float64)
+        q_recent = qz["recent_recall_at_10"].astype(np.float64)
+        q_missed = qz["missed_neighbors"].astype(np.int64)
+    return SimulationRunResult(
+        run_id=str(summary["run_id"]),
+        config=config,
+        epochs_df=epochs_df,
+        summary=summary,
+        bus=ByteBus(num_shards=int(config["num_shards"]), num_epochs=int(config["num_epochs"])),
+        all_query_recall=q_recall,
+        all_query_recent_recall=q_recent,
+        all_query_missed_neighbors=q_missed,
+    )
+
+
 def run_from_config(
     config_path: Path,
     repo_root: Optional[Path] = None,
     data_dir: Optional[Path] = None,
     results_root: Optional[Path] = None,
+    num_workers: int = 8,
+    use_gt_cache: bool = True,
 ) -> List[SimulationRunResult]:
     """Execute all runs defined in a YAML experiment config file."""
+    set_single_thread_env()
     if repo_root is None:
         repo_root = Path(__file__).resolve().parent.parent
     if data_dir is None:
@@ -660,6 +1140,7 @@ def run_from_config(
         results_root = repo_root / "results"
 
     raw_bytes = config_path.read_bytes()
+    config_sha256 = hashlib.sha256(raw_bytes).hexdigest()
     cfg = yaml.safe_load(raw_bytes.decode("utf-8"))
 
     exp_name = str(cfg.get("experiment", config_path.stem))
@@ -753,7 +1234,13 @@ def run_from_config(
             for ag_val in aging_list
         ]
 
-    results: List[SimulationRunResult] = []
+    gt_cache_dir = results_root / "_gt_cache"
+    if use_gt_cache:
+        gt_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    gt_tasks_by_key: Dict[str, Dict[str, Any]] = {}
+    sim_tasks: List[Dict[str, Any]] = []
+
     for cond in condition_specs:
         recent_window_w = cond["recent_window_w"]
         bursts = cond["bursts"]
@@ -769,6 +1256,35 @@ def run_from_config(
                     for b_sum in budgets_list:
                         for q_val in q_list:
                             for seed in seeds_list:
+                                gt_key = make_gt_cache_key(
+                                    stream_mode=str(stream_mode),
+                                    placement_mode=placement_mode,
+                                    sharding_mode=sharding_mode,
+                                    num_shards=int(s_count),
+                                    num_epochs=num_epochs,
+                                    inserts_per_epoch=inserts_per_epoch,
+                                    queries_per_epoch=int(q_val),
+                                    bursts=bursts,
+                                    seed=int(seed),
+                                    n_init=n_init,
+                                    n_stream=n_stream,
+                                )
+                                gt_cache_path = gt_cache_dir / f"{gt_key}.npz" if use_gt_cache else None
+                                if use_gt_cache and gt_key not in gt_tasks_by_key:
+                                    gt_tasks_by_key[gt_key] = {
+                                        "cache_key": gt_key,
+                                        "gt_cache_path": str(gt_cache_path),
+                                        "num_shards": int(s_count),
+                                        "num_epochs": num_epochs,
+                                        "inserts_per_epoch": inserts_per_epoch,
+                                        "queries_per_epoch": int(q_val),
+                                        "stream_mode": str(stream_mode),
+                                        "bursts": bursts,
+                                        "sharding_mode": sharding_mode,
+                                        "placement_mode": placement_mode,
+                                        "seed": int(seed),
+                                    }
+
                                 for pol in policies:
                                     # When sweeping charge_setup_to_budget across [false, true],
                                     # only recovered_neighbor has setup sample vectors to charge.
@@ -785,44 +1301,97 @@ def run_from_config(
                                         f"_bursts{int(bursts)}_setup{int(charge_setup_to_budget)}"
                                         f"_{aging_mode}_{cap_tag}_seed{seed}"
                                     )
-                                    res = run_single_simulation(
-                                        initial_vectors=init_vecs,
-                                        initial_ids=init_ids,
-                                        stream_vectors=stream_vecs,
-                                        stream_ids=stream_ids,
-                                        test_queries=test_q,
-                                        test_query_ids=test_qids,
-                                        sample_queries=sample_q,
-                                        sample_query_ids=sample_qids,
-                                        policy=str(pol),
-                                        num_shards=int(s_count),
-                                        c=c,
-                                        m=int(m_val),
-                                        budget_summaries=int(b_sum),
-                                        num_epochs=num_epochs,
-                                        inserts_per_epoch=inserts_per_epoch,
-                                        queries_per_epoch=int(q_val),
-                                        recent_window_w=recent_window_w,
-                                        stream_mode=str(stream_mode),
-                                        bursts=bursts,
-                                        sharding_mode=sharding_mode,
-                                        placement_mode=placement_mode,
-                                        seed=int(seed),
-                                        exact_local_search=exact_local_search,
-                                        charge_setup_to_budget=charge_setup_to_budget,
-                                        aging_mode=aging_mode,
-                                        starvation_cap_epochs=starvation_cap_epochs,
-                                        run_id=run_id,
-                                    )
                                     run_dir = exp_out_dir / run_id
-                                    save_run_outputs(
-                                        result=res,
-                                        out_dir=run_dir,
-                                        repo_root=repo_root,
-                                        config_raw_bytes=raw_bytes,
-                                        data_provenance_path=data_dir / "PROVENANCE.json",
+                                    sim_tasks.append(
+                                        {
+                                            "run_id": run_id,
+                                            "run_dir": str(run_dir),
+                                            "policy": str(pol),
+                                            "num_shards": int(s_count),
+                                            "c": c,
+                                            "m": int(m_val),
+                                            "budget_summaries": int(b_sum),
+                                            "num_epochs": num_epochs,
+                                            "inserts_per_epoch": inserts_per_epoch,
+                                            "queries_per_epoch": int(q_val),
+                                            "recent_window_w": recent_window_w,
+                                            "stream_mode": str(stream_mode),
+                                            "bursts": bursts,
+                                            "sharding_mode": sharding_mode,
+                                            "placement_mode": placement_mode,
+                                            "seed": int(seed),
+                                            "exact_local_search": exact_local_search,
+                                            "charge_setup_to_budget": charge_setup_to_budget,
+                                            "aging_mode": aging_mode,
+                                            "starvation_cap_epochs": starvation_cap_epochs,
+                                            "gt_cache_path": (
+                                                str(gt_cache_path) if gt_cache_path is not None else None
+                                            ),
+                                        }
                                     )
-                                    results.append(res)
+
+    effective_workers = int(cfg.get("num_workers", num_workers))
+    failed_runs_log: List[Dict[str, Any]] = []
+    results: List[SimulationRunResult] = []
+
+    if effective_workers <= 1 or len(sim_tasks) <= 1:
+        _init_pool_worker(str(data_dir), n_init, n_stream, str(repo_root), config_sha256)
+        if use_gt_cache:
+            for gt_task in gt_tasks_by_key.values():
+                _worker_build_gt_task(gt_task)
+        for task in sim_tasks:
+            out = _worker_run_sim_task(task)
+            if out["status"] != "ok":
+                failed_runs_log.append(
+                    {"run_id": out["run_id"], "error": out["error"], "attempt": 1}
+                )
+                out = _worker_run_sim_task(task)
+                if out["status"] != "ok":
+                    failed_runs_log.append(
+                        {"run_id": out["run_id"], "error": out["error"], "attempt": 2}
+                    )
+                    raise RuntimeError(f"Run {out['run_id']} failed after retry:\n{out['error']}")
+            results.append(
+                _load_saved_run_result(Path(out["run_dir"]), out["config"], out["summary"])
+            )
+    else:
+        n_pool = min(effective_workers, max(1, len(sim_tasks)))
+        with mp.Pool(
+            processes=n_pool,
+            initializer=_init_pool_worker,
+            initargs=(str(data_dir), n_init, n_stream, str(repo_root), config_sha256),
+        ) as pool:
+            if use_gt_cache:
+                missing_gt_tasks = [
+                    t for t in gt_tasks_by_key.values() if not Path(t["gt_cache_path"]).exists()
+                ]
+                if missing_gt_tasks:
+                    list(pool.imap_unordered(_worker_build_gt_task, missing_gt_tasks))
+
+            raw_outcomes = list(pool.imap(_worker_run_sim_task, sim_tasks))
+
+            for idx, out in enumerate(raw_outcomes):
+                if out["status"] != "ok":
+                    failed_runs_log.append(
+                        {"run_id": out["run_id"], "error": out["error"], "attempt": 1}
+                    )
+                    retry_out = pool.apply(_worker_run_sim_task, (sim_tasks[idx],))
+                    if retry_out["status"] != "ok":
+                        failed_runs_log.append(
+                            {"run_id": retry_out["run_id"], "error": retry_out["error"], "attempt": 2}
+                        )
+                        with (exp_out_dir / "failed_runs.json").open("w", encoding="utf-8") as f:
+                            json.dump(failed_runs_log, f, indent=2)
+                        raise RuntimeError(
+                            f"Run {retry_out['run_id']} failed after retry:\n{retry_out['error']}"
+                        )
+                    out = retry_out
+                results.append(
+                    _load_saved_run_result(Path(out["run_dir"]), out["config"], out["summary"])
+                )
+
+    with (exp_out_dir / "failed_runs.json").open("w", encoding="utf-8") as f:
+        json.dump(failed_runs_log, f, indent=2)
 
     # Also write an experiment-level summary table and paired bootstrap comparisons if recovered_neighbor is present
     if results:
@@ -934,11 +1503,24 @@ def main() -> None:
         type=Path,
         default=Path(__file__).resolve().parent.parent / "results",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Number of parallel worker processes (default: 8)",
+    )
+    parser.add_argument(
+        "--no-gt-cache",
+        action="store_true",
+        help="Disable ground-truth caching across methods",
+    )
     args = parser.parse_args()
     run_from_config(
         config_path=args.config,
         data_dir=args.data_dir,
         results_root=args.results_dir,
+        num_workers=args.workers,
+        use_gt_cache=not args.no_gt_cache,
     )
 
 

@@ -54,7 +54,13 @@ from dvs.policies import (
     REFRESH_POLICIES,
     compute_arithmetic_starvation_cap,
 )
-from dvs.run import run_single_simulation
+from dvs.run import (
+    build_ground_truth_cache,
+    load_ground_truth_cache,
+    run_from_config,
+    run_single_simulation,
+    save_ground_truth_cache,
+)
 from dvs.shards import Shard
 from dvs.streams import partition_new_topic_stream
 from dvs.summary import ShardSummary
@@ -810,3 +816,132 @@ def test_8_spearman_cpu_aging_and_new_topic(real_subset_data) -> None:
     assert res_ts.summary["placement_mode"] == "time_segment"
     assert res_ts.summary["starvation_cap_mode"] == "arithmetic"
     assert res_ts.summary["starvation_cap_epochs"] == 4
+
+
+def test_9_cached_vs_uncached_ground_truth_identical_recall(real_subset_data, tmp_path) -> None:
+    """Test 9 (Step 2): Cached and uncached ground truth give bit-for-bit identical recall for one small config."""
+    init_v, init_id, stream_v, stream_id, test_q, test_qid, sample_q, sample_qid = real_subset_data
+
+    for placement in ("nearest_initial", "time_segment"):
+        gt_cache = build_ground_truth_cache(
+            initial_vectors=init_v,
+            initial_ids=init_id,
+            stream_vectors=stream_v,
+            stream_ids=stream_id,
+            test_queries=test_q,
+            test_query_ids=test_qid,
+            sample_queries=sample_q,
+            num_shards=8,
+            num_epochs=4,
+            inserts_per_epoch=150,
+            queries_per_epoch=30,
+            stream_mode="steady",
+            placement_mode=placement,
+            seed=42,
+        )
+        gt_file = tmp_path / f"gt_{placement}.npz"
+        save_ground_truth_cache(gt_cache, gt_file)
+        loaded_gt = load_ground_truth_cache(gt_file)
+
+        for pol in ("never_refresh", "always_fresh", "recovered_neighbor", "extra_search", "push_vectors"):
+            res_uncached = run_single_simulation(
+                initial_vectors=init_v,
+                initial_ids=init_id,
+                stream_vectors=stream_v,
+                stream_ids=stream_id,
+                test_queries=test_q,
+                test_query_ids=test_qid,
+                sample_queries=sample_q,
+                sample_query_ids=sample_qid,
+                policy=pol,
+                num_shards=8,
+                m=2,
+                budget_summaries=2,
+                num_epochs=4,
+                inserts_per_epoch=150,
+                queries_per_epoch=30,
+                stream_mode="steady",
+                placement_mode=placement,
+                seed=42,
+                cached_gt=None,
+            )
+            res_cached = run_single_simulation(
+                initial_vectors=init_v,
+                initial_ids=init_id,
+                stream_vectors=stream_v,
+                stream_ids=stream_id,
+                test_queries=test_q,
+                test_query_ids=test_qid,
+                sample_queries=sample_q,
+                sample_query_ids=sample_qid,
+                policy=pol,
+                num_shards=8,
+                m=2,
+                budget_summaries=2,
+                num_epochs=4,
+                inserts_per_epoch=150,
+                queries_per_epoch=30,
+                stream_mode="steady",
+                placement_mode=placement,
+                seed=42,
+                cached_gt=loaded_gt,
+            )
+            assert np.array_equal(res_uncached.all_query_recall, res_cached.all_query_recall)
+            assert np.array_equal(
+                np.nan_to_num(res_uncached.all_query_recent_recall, nan=-1.0),
+                np.nan_to_num(res_cached.all_query_recent_recall, nan=-1.0),
+            )
+            assert np.array_equal(
+                res_uncached.all_query_missed_neighbors,
+                res_cached.all_query_missed_neighbors,
+            )
+            assert res_uncached.summary["overall_recall_at_10_mean"] == res_cached.summary["overall_recall_at_10_mean"]
+            assert (
+                res_uncached.summary["recent_recall_at_10_query_mean"]
+                == res_cached.summary["recent_recall_at_10_query_mean"]
+            )
+            assert res_uncached.summary["total_budget_bytes_spent"] == res_cached.summary["total_budget_bytes_spent"]
+
+    # Also test run_from_config with a small YAML config (cached vs uncached)
+    small_cfg_path = tmp_path / "small_cfg.yaml"
+    small_cfg_path.write_text(
+        "\n".join([
+            "experiment: small_test",
+            "initial_vectors_limit: 800",
+            "stream_vectors_limit: 400",
+            "num_shards: 4",
+            "c: 8",
+            "m: 2",
+            "budget_summaries: 2",
+            "num_epochs: 3",
+            "inserts_per_epoch: 100",
+            "queries_per_epoch: 20",
+            "stream_modes: [steady]",
+            "placement_mode: time_segment",
+            "seeds: [42]",
+            "policies: [never_refresh, recovered_neighbor, extra_search]",
+            "num_workers: 2",
+        ]),
+        encoding="utf-8",
+    )
+    res_list_cached = run_from_config(
+        config_path=small_cfg_path,
+        results_root=tmp_path / "out_cached",
+        num_workers=2,
+        use_gt_cache=True,
+    )
+    res_list_uncached = run_from_config(
+        config_path=small_cfg_path,
+        results_root=tmp_path / "out_uncached",
+        num_workers=1,
+        use_gt_cache=False,
+    )
+    assert len(res_list_cached) == len(res_list_uncached) == 3
+    for rc, ru in zip(res_list_cached, res_list_uncached):
+        assert rc.run_id == ru.run_id
+        assert np.array_equal(rc.all_query_recall, ru.all_query_recall)
+        assert np.array_equal(
+            np.nan_to_num(rc.all_query_recent_recall, nan=-1.0),
+            np.nan_to_num(ru.all_query_recent_recall, nan=-1.0),
+        )
+        assert rc.summary["overall_recall_at_10_mean"] == ru.summary["overall_recall_at_10_mean"]
