@@ -158,6 +158,27 @@ class Coordinator:
         top_m_shards = ranked_shards[:, :m_eff]
         return top_m_shards, ranked_shards, ranked_scores
 
+    def route_queries_oracle(
+        self,
+        gt_shards: np.ndarray,
+        m: Optional[int] = None,
+    ) -> np.ndarray:
+        """Route each query to the top-m shards holding the most ground-truth top-10 neighbors.
+
+        Uses ground-truth shard assignments (`gt_shards` of shape (Q, k_eff)), so it is only a
+        reference upper bound on m-shard routing. Ties break deterministically by lowest shard_id.
+        """
+        m_eff = min(self.num_shards, self.m if m is None else int(m))
+        num_q = gt_shards.shape[0]
+        oracle_top_m = np.empty((num_q, m_eff), dtype=np.int64)
+        for q_idx in range(num_q):
+            valid_sids = gt_shards[q_idx]
+            valid_sids = valid_sids[valid_sids >= 0]
+            counts = np.bincount(valid_sids, minlength=self.num_shards)
+            ranked = np.argsort(-counts, kind="mergesort")
+            oracle_top_m[q_idx] = ranked[:m_eff]
+        return oracle_top_m
+
     @staticmethod
     def merge_candidates(
         candidate_ids_list: Sequence[np.ndarray],
@@ -199,6 +220,7 @@ class Coordinator:
         m: Optional[int] = None,
         extra_shards_per_query: Optional[Dict[int, List[int]]] = None,
         record_popularity: bool = True,
+        override_top_m_shards: Optional[np.ndarray] = None,
     ) -> Tuple[List[np.ndarray], List[np.ndarray], np.ndarray]:
         """Execute a batch of test queries across top-m routed shards (plus any extra shards).
 
@@ -214,7 +236,10 @@ class Coordinator:
         q_arr = np.ascontiguousarray(queries, dtype=np.float32)
         num_q = q_arr.shape[0]
         m_eff = min(self.num_shards, self.m if m is None else int(m))
-        top_m_shards, _, _ = self.route_queries(q_arr, m=m_eff)
+        if override_top_m_shards is not None:
+            top_m_shards = np.asarray(override_top_m_shards, dtype=np.int64)[:, :m_eff]
+        else:
+            top_m_shards, _, _ = self.route_queries(q_arr, m=m_eff)
 
         if record_popularity and m_eff > 0:
             counts = np.bincount(top_m_shards.ravel(), minlength=self.num_shards)

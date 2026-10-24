@@ -11,11 +11,15 @@ recent_window_w: 2
 stream_modes: [cluster_order]
 bursts: false
 sharding_mode: kmeans
+charge_setup_to_budget: false
+aging_mode: starvation_cap
 seeds: [42, 43, 44, 45, 46]
 policies:
+  - never_refresh
+  - always_fresh
+  - oracle_routing
   - recovered_neighbor
   - data_change
   - round_robin
   - extra_search
   - push_vectors
-  - always_fresh

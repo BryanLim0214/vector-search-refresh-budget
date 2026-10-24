@@ -1,5 +1,5 @@
 experiment: exp5_reference_checks
-description: "Reference checks: hash sharding vs k-means, setup cost charged to B, and bursty arrivals"
+description: "Single-factor reference checks (each changing only one factor vs default): setup cost charged to B, hash sharding, bursty arrivals, and additive aging sensitivity"
 num_shards: [32]
 c: 16
 m: [2]
@@ -9,9 +9,31 @@ inserts_per_epoch: 1000
 queries_per_epoch: [200]
 recent_window_w: 2
 stream_modes: [cluster_order]
-bursts: true
-sharding_mode: hash
-charge_setup_to_budget: true
+bursts: false
+sharding_mode: kmeans
+charge_setup_to_budget: false
+aging_mode: starvation_cap
+conditions:
+  - charge_setup_to_budget: false
+    sharding_mode: kmeans
+    bursts: false
+    aging_mode: starvation_cap
+  - charge_setup_to_budget: true
+    sharding_mode: kmeans
+    bursts: false
+    aging_mode: starvation_cap
+  - charge_setup_to_budget: false
+    sharding_mode: hash
+    bursts: false
+    aging_mode: starvation_cap
+  - charge_setup_to_budget: false
+    sharding_mode: kmeans
+    bursts: true
+    aging_mode: starvation_cap
+  - charge_setup_to_budget: false
+    sharding_mode: kmeans
+    bursts: false
+    aging_mode: additive
 seeds: [42, 43, 44, 45, 46]
 policies:
   - recovered_neighbor

@@ -298,4 +298,9 @@ class ByteBus:
         return float(self._setup_sample_vectors_bytes) / float(self.num_epochs)
 
     def epoch_budget_bytes_with_amortized_setup(self, epoch: int) -> float:
+        if any(
+            m.epoch == epoch and m.category == "setup_sample_vectors_amortized"
+            for m in self.messages
+        ):
+            return float(self.epoch_budget_bytes(epoch))
         return float(self.epoch_budget_bytes(epoch)) + self.amortized_setup_sample_bytes_per_epoch()

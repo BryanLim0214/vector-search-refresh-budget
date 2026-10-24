@@ -1,6 +1,6 @@
-"""Stream arrival schedules (steady, cluster_order, query_shift) and optional bursts.
+"""Stream arrival schedules (steady, cluster_order, query_shift, new_topic) and optional bursts.
 
-Matches proposal/proposal.tex Section 5 and audit/AGY_TASK_B1_build.md:
+Matches proposal/proposal.tex Section 5, audit/AGY_TASK_B1_build.md, and audit/AGY_TASK_B2_fixes_pilot.md:
 - steady: seeded random arrival order over the streamed vectors.
 - cluster_order: Big-ANN streaming runbook style; k-means with 64 clusters on the streamed
   vectors, inserting cluster by cluster (clusters ordered by seeded permutation, vectors within
@@ -11,6 +11,9 @@ Matches proposal/proposal.tex Section 5 and audit/AGY_TASK_B1_build.md:
   Specifically, the 1,000 test queries are sorted in ascending order of mean_sim(q), and each
   epoch draws its Q test queries from the farthest pool of size max(Q, int(far_pool_fraction * N_test))
   (default far_pool_fraction=0.25, i.e., the 250 farthest test queries for Q=200).
+- new_topic: spherical k-means (faiss, fixed seed, 64 clusters) on ALL 100,000 vectors; put the
+  clusters in a seeded random order; the initial set is the vectors of the first 32 clusters,
+  and the stream is the vectors of the other 32 clusters, inserted cluster by cluster.
 - bursts: optional flag that concentrates insertions into periodic high-rate burst epochs while
   preserving total insertions across the run.
 """
@@ -18,14 +21,14 @@ Matches proposal/proposal.tex Section 5 and audit/AGY_TASK_B1_build.md:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import faiss
 import numpy as np
 
-from dvs.bus import DIM
+from dvs.bus import DIM, TOP_K
 
-STREAM_MODES = frozenset({"steady", "cluster_order", "query_shift"})
+STREAM_MODES = frozenset({"steady", "cluster_order", "query_shift", "new_topic"})
 NUM_STREAM_CLUSTERS: int = 64
 
 
@@ -40,6 +43,122 @@ class EpochBatch:
     test_query_ids: np.ndarray  # shape (Q,) int64
 
 
+def partition_new_topic_stream(
+    initial_vectors: np.ndarray,
+    initial_ids: np.ndarray,
+    stream_vectors: np.ndarray,
+    stream_ids: np.ndarray,
+    seed: int = 42,
+    num_clusters: int = NUM_STREAM_CLUSTERS,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Partition all vectors into initial (first 32 clusters) and stream (other 32 clusters, cluster-by-cluster).
+
+    Runs 64-cluster spherical k-means (faiss, fixed seed) on ALL vectors (`initial_vectors` +
+    `stream_vectors`), orders the 64 clusters by a seeded random permutation, assigns the vectors
+    of the first 32 clusters to the initial set, and orders the vectors of the remaining 32 clusters
+    cluster by cluster (with seeded permutation within each cluster) as the stream.
+    """
+    all_vecs = np.ascontiguousarray(
+        np.vstack([initial_vectors, stream_vectors]), dtype=np.float32
+    )
+    all_ids = np.ascontiguousarray(
+        np.concatenate([initial_ids, stream_ids]), dtype=np.int64
+    )
+    n = len(all_vecs)
+    if n == 0:
+        return (
+            np.empty((0, DIM), dtype=np.float32),
+            np.empty(0, dtype=np.int64),
+            np.empty((0, DIM), dtype=np.float32),
+            np.empty(0, dtype=np.int64),
+        )
+
+    k_eff = max(2, min(int(num_clusters), n))
+    half_k = k_eff // 2
+
+    km = faiss.Kmeans(
+        d=DIM,
+        k=k_eff,
+        niter=20,
+        seed=int(seed),
+        spherical=True,
+        verbose=False,
+        min_points_per_centroid=1,
+        max_points_per_centroid=max(n, 100000),
+    )
+    km.train(all_vecs)
+    centroids = np.ascontiguousarray(km.centroids, dtype=np.float32)
+    c_norm_sq = np.sum(centroids ** 2, axis=1, keepdims=True).T
+    sq_dists = c_norm_sq - 2.0 * (all_vecs @ centroids.T)
+    labels = np.argmin(sq_dists, axis=1)
+
+    rng = np.random.default_rng(int(seed))
+    cluster_order = rng.permutation(k_eff)
+    init_clusters = cluster_order[:half_k]
+    stream_clusters = cluster_order[half_k:]
+
+    # Initial set: vectors of the first 32 clusters (preserving index order in all_vecs)
+    init_mask = np.isin(labels, init_clusters)
+    init_indices = np.nonzero(init_mask)[0]
+
+    # Stream set: vectors of the other 32 clusters, inserted cluster by cluster
+    stream_ordered_indices: List[np.ndarray] = []
+    for cid in stream_clusters:
+        members = np.nonzero(labels == cid)[0]
+        if len(members) > 0:
+            shuffled_members = members[rng.permutation(len(members))]
+            stream_ordered_indices.append(shuffled_members)
+    stream_perm = (
+        np.concatenate(stream_ordered_indices)
+        if stream_ordered_indices
+        else np.empty(0, dtype=np.int64)
+    )
+
+    return (
+        np.ascontiguousarray(all_vecs[init_indices], dtype=np.float32),
+        np.ascontiguousarray(all_ids[init_indices], dtype=np.int64),
+        np.ascontiguousarray(all_vecs[stream_perm], dtype=np.float32),
+        np.ascontiguousarray(all_ids[stream_perm], dtype=np.int64),
+    )
+
+
+def compute_new_topic_query_stats(
+    initial_vectors: np.ndarray,
+    stream_vectors: np.ndarray,
+    test_queries: np.ndarray,
+    k: int = TOP_K,
+) -> Dict[str, float | int]:
+    """Compute how many test queries have most of their true top-k neighbors in the streamed half."""
+    n_init = int(len(initial_vectors))
+    n_stream = int(len(stream_vectors))
+    n_q = int(len(test_queries))
+    if n_init + n_stream == 0 or n_q == 0:
+        return {
+            "initial_set_size": n_init,
+            "stream_set_size": n_stream,
+            "queries_with_most_neighbors_in_stream": 0,
+            "queries_with_at_least_half_neighbors_in_stream": 0,
+            "mean_stream_neighbors_in_top_k": 0.0,
+        }
+    all_vecs = np.ascontiguousarray(
+        np.vstack([initial_vectors, stream_vectors]), dtype=np.float32
+    )
+    q = np.ascontiguousarray(test_queries, dtype=np.float32)
+    k_eff = min(int(k), len(all_vecs))
+    idx = faiss.IndexFlatIP(DIM)
+    idx.add(all_vecs)
+    _, indices = idx.search(q, k_eff)
+    in_stream = indices >= n_init
+    stream_counts = np.sum(in_stream, axis=1)
+    return {
+        "initial_set_size": n_init,
+        "stream_set_size": n_stream,
+        "queries_with_most_neighbors_in_stream": int(np.sum(stream_counts > (k_eff / 2.0))),
+        "queries_with_at_least_half_neighbors_in_stream": int(np.sum(stream_counts >= (k_eff / 2.0))),
+        "mean_stream_neighbors_in_top_k": float(np.mean(stream_counts)),
+    }
+
+
 def order_stream_passages(
     stream_vectors: np.ndarray,
     stream_ids: np.ndarray,
@@ -47,11 +166,15 @@ def order_stream_passages(
     seed: int = 42,
     num_clusters: int = NUM_STREAM_CLUSTERS,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Return `(ordered_vectors, ordered_ids)` according to `mode` ('steady' or 'cluster_order')."""
+    """Return `(ordered_vectors, ordered_ids)` according to `mode`."""
     vecs = np.ascontiguousarray(stream_vectors, dtype=np.float32)
     ids = np.ascontiguousarray(stream_ids, dtype=np.int64)
     n = len(vecs)
     if n == 0:
+        return vecs, ids
+
+    if mode == "new_topic":
+        # Already ordered cluster-by-cluster by partition_new_topic_stream
         return vecs, ids
 
     rng = np.random.default_rng(int(seed))
@@ -133,9 +256,13 @@ def compute_epoch_insert_counts(
     inserts_per_epoch: int,
     total_available: int,
     bursts: bool = False,
+    consume_all_available: bool = False,
 ) -> List[int]:
     """Return number of insertions for each epoch (with optional bursty schedule)."""
-    target_total = min(int(num_epochs) * int(inserts_per_epoch), int(total_available))
+    if consume_all_available:
+        target_total = int(total_available)
+    else:
+        target_total = min(int(num_epochs) * int(inserts_per_epoch), int(total_available))
     if not bursts or num_epochs <= 1:
         base = target_total // num_epochs
         rem = target_total % num_epochs
@@ -194,6 +321,7 @@ def build_epoch_schedule(
         inserts_per_epoch=inserts_per_epoch,
         total_available=len(ordered_vecs),
         bursts=bursts,
+        consume_all_available=(stream_mode == "new_topic"),
     )
 
     batches: List[EpochBatch] = []

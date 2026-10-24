@@ -123,7 +123,9 @@ class GroundTruthIndex:
 
 
 class CPUTimer:
-    """Tracks CPU process_time per component within an epoch."""
+    """Tracks CPU process_time per component within an epoch (excluding ground_truth from method total)."""
+
+    METHOD_COMPONENTS = ("insert", "summary", "policy", "query")
 
     def __init__(self) -> None:
         self.times: Dict[str, float] = {
@@ -131,6 +133,7 @@ class CPUTimer:
             "summary": 0.0,
             "policy": 0.0,
             "query": 0.0,
+            "ground_truth": 0.0,
         }
 
     @contextmanager
@@ -144,7 +147,7 @@ class CPUTimer:
 
     @property
     def total(self) -> float:
-        return float(sum(self.times.values()))
+        return float(sum(self.times[c] for c in self.METHOD_COMPONENTS))
 
 
 @dataclass
@@ -173,7 +176,7 @@ def evaluate_epoch_queries(
     recent_window_w: int = 2,
     k: int = TOP_K,
     pushed_id_set: Optional[set[int]] = None,
-    spearman_rho: float = 0.0,
+    spearman_rho: float = float("nan"),
 ) -> EpochMetricsResult:
     """Compute overall recall@10, recent recall@10 (window W), and missed neighbors."""
     num_q = len(returned_ids_list)
@@ -293,18 +296,21 @@ def compute_spearman_correlation(
     estimated: Optional[np.ndarray],
     true_recovered: Optional[np.ndarray],
 ) -> float:
-    """Return Spearman rank correlation between estimated and true recovered neighbors across shards."""
+    """Return Spearman rank correlation between estimated and true recovered neighbors across shards.
+
+    Returns NaN when undefined (e.g., None inputs, fewer than 2 shards, or constant arrays).
+    """
     if estimated is None or true_recovered is None:
-        return 0.0
+        return float("nan")
     est = np.asarray(estimated, dtype=np.float64)
     tru = np.asarray(true_recovered, dtype=np.float64)
     if len(est) < 2 or len(est) != len(tru):
-        return 0.0
+        return float("nan")
     if np.all(est == est[0]) or np.all(tru == tru[0]):
-        return 0.0
+        return float("nan")
     res = spearmanr(est, tru)
     rho = float(res.statistic)
-    return 0.0 if np.isnan(rho) else rho
+    return float("nan") if np.isnan(rho) else rho
 
 
 def paired_bootstrap_ci(

@@ -1,6 +1,7 @@
-"""Refresh policies, equal-bytes alternatives, and oracle bounds.
+"""Refresh policies, equal-bytes alternatives, and reference policies.
 
-Implements all 9 methods specified in proposal/proposal.tex Section 4 and audit/AGY_TASK_B1_build.md:
+Implements all 11 methods specified in proposal/proposal.tex Section 4, audit/AGY_TASK_B1_build.md,
+and audit/AGY_TASK_B2_fixes_pilot.md:
 Refresh rules (sending whole 24,576-byte summaries under budget B):
   1. round_robin
   2. data_change
@@ -10,9 +11,11 @@ Refresh rules (sending whole 24,576-byte summaries under budget B):
 Equal-bytes alternatives (under budget B):
   6. extra_search (1,656 bytes per extra shard search, prioritized by smallest gap s_(m) - s_(m+1))
   7. push_vectors (1,536 bytes per pushed vector, newest vectors pushed first, searched at coordinator)
-Bounds:
-  8. always_fresh (unbounded summary refresh of all S shards every epoch)
-  9. all_shards (search all S shards for every query)
+References (no byte limit, reported for context):
+  8. never_refresh (published summaries never change after setup)
+  9. always_fresh (unbounded summary refresh of all S shards every epoch; fresh-summary reference)
+ 10. oracle_routing (route each query to the m shards holding the most ground-truth top-10 neighbors)
+ 11. all_shards (search all S shards for every query)
 """
 
 from __future__ import annotations
@@ -47,14 +50,21 @@ ALTERNATIVE_POLICIES = frozenset({
     "push_vectors",
 })
 
-BOUND_POLICIES = frozenset({
+REFERENCE_POLICIES = frozenset({
+    "never_refresh",
     "always_fresh",
+    "oracle_routing",
     "all_shards",
 })
 
-ALL_POLICIES = REFRESH_POLICIES | ALTERNATIVE_POLICIES | BOUND_POLICIES
+# Backwards-compatible alias
+BOUND_POLICIES = REFERENCE_POLICIES
+
+ALL_POLICIES = REFRESH_POLICIES | ALTERNATIVE_POLICIES | REFERENCE_POLICIES
 
 AGING_PER_EPOCH: float = 0.5
+STARVATION_CAP_EPOCHS: int = 8
+AGING_MODES = frozenset({"starvation_cap", "additive"})
 
 
 def scale_scores_unit_interval(raw_scores: np.ndarray) -> np.ndarray:
@@ -99,15 +109,23 @@ class PolicyController:
         m: int,
         num_epochs: int = 50,
         charge_setup_to_budget: bool = False,
+        aging_mode: str = "starvation_cap",
+        starvation_cap_epochs: int = STARVATION_CAP_EPOCHS,
+        aging_per_epoch: float = AGING_PER_EPOCH,
     ) -> None:
         if policy not in ALL_POLICIES:
             raise ValueError(f"Unknown policy '{policy}'. Expected one of {sorted(ALL_POLICIES)}")
+        if aging_mode not in AGING_MODES:
+            raise ValueError(f"Unknown aging_mode '{aging_mode}'. Expected one of {sorted(AGING_MODES)}")
         self.policy = policy
         self.budget_bytes = int(budget_bytes)
         self.num_shards = int(num_shards)
         self.m = int(m)
         self.num_epochs = int(num_epochs)
         self.charge_setup_to_budget = bool(charge_setup_to_budget)
+        self.aging_mode = str(aging_mode)
+        self.starvation_cap_epochs = int(starvation_cap_epochs)
+        self.aging_per_epoch = float(aging_per_epoch)
         self._rr_cursor: int = 0
 
         # Track unpushed streamed vectors in arrival order: list of (doc_id, shard_id, vector)
@@ -286,19 +304,22 @@ class PolicyController:
         coordinator: Coordinator,
         bus: ByteBus,
         sample_queries: np.ndarray,
-        epoch_test_queries: np.ndarray,
+        epoch_test_queries: Optional[np.ndarray] = None,
+        rn_estimates: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
     ) -> PolicyEpochDecision:
         """Execute the policy's maintenance or pre-query adaptation for `epoch`."""
         decision = PolicyEpochDecision(policy=self.policy, epoch=epoch)
 
-        # Every epoch, shards advance their age since last refresh by 1 and build candidate summaries
+        # Every epoch, shards advance their age since last refresh by 1
         for shard in shards:
             shard.epochs_since_refresh += 1
 
-        if self.policy == "all_shards":
+        if self.policy in ("all_shards", "never_refresh", "oracle_routing"):
             return decision
 
         if self.policy == "extra_search":
+            if epoch_test_queries is None:
+                raise ValueError("epoch_test_queries must be provided for policy='extra_search'")
             extra_map, count = self.plan_extra_searches(epoch_test_queries, coordinator)
             decision.extra_shards_per_query = extra_map
             decision.num_extra_searches = count
@@ -332,15 +353,27 @@ class PolicyController:
                 decision.refreshed_shards.append(shard.shard_id)
             return decision
 
-        # Compute raw scores across shards (and always compute recovered_neighbor estimates for correlation logging)
-        rn_raw, lift_flips, drop_flips = self.compute_recovered_neighbor_raw_scores(
-            shards=shards,
-            coordinator=coordinator,
-            sample_queries=sample_queries,
-        )
-        decision.estimated_recovered_neighbors = rn_raw.copy()
-        decision.lift_in_flips_per_shard = lift_flips.copy()
-        decision.dropout_flips_per_shard = drop_flips.copy()
+        # Charge recovered-neighbor probing CPU time only to recovered_neighbor;
+        # for other refresh policies, accept pre-computed rn_estimates (if provided outside timer)
+        if self.policy == "recovered_neighbor":
+            if rn_estimates is None:
+                rn_raw, lift_flips, drop_flips = self.compute_recovered_neighbor_raw_scores(
+                    shards=shards,
+                    coordinator=coordinator,
+                    sample_queries=sample_queries,
+                )
+            else:
+                rn_raw, lift_flips, drop_flips = rn_estimates
+            decision.estimated_recovered_neighbors = rn_raw.copy()
+            decision.lift_in_flips_per_shard = lift_flips.copy()
+            decision.dropout_flips_per_shard = drop_flips.copy()
+        elif rn_estimates is not None:
+            rn_raw, lift_flips, drop_flips = rn_estimates
+            decision.estimated_recovered_neighbors = rn_raw.copy()
+            decision.lift_in_flips_per_shard = lift_flips.copy()
+            decision.dropout_flips_per_shard = drop_flips.copy()
+        else:
+            rn_raw = np.zeros(self.num_shards, dtype=np.float64)
 
         remaining_budget = self.budget_bytes
 
@@ -393,7 +426,10 @@ class PolicyController:
         num_summaries_to_send = min(self.num_shards, max(0, remaining_budget // SUMMARY_BYTES))
         ages = np.array([s.epochs_since_refresh for s in shards], dtype=np.float64)
         scaled = scale_scores_unit_interval(raw_scores)
-        priorities = scaled + AGING_PER_EPOCH * ages
+        if self.aging_mode == "additive":
+            priorities = scaled + self.aging_per_epoch * ages
+        else:
+            priorities = scaled.copy()
 
         decision.raw_scores = raw_scores.copy()
         decision.scaled_scores = scaled.copy()
@@ -404,12 +440,23 @@ class PolicyController:
 
         if self.policy == "round_robin":
             selected_shards: List[int] = []
-            for offset in range(self.num_shards):
-                cand_sid = (self._rr_cursor + offset) % self.num_shards
-                if shards[cand_sid].num_new_vectors > 0:
-                    selected_shards.append(cand_sid)
-                    if len(selected_shards) == num_summaries_to_send:
-                        break
+            if self.aging_mode == "starvation_cap":
+                for offset in range(self.num_shards):
+                    cand_sid = (self._rr_cursor + offset) % self.num_shards
+                    if (
+                        shards[cand_sid].num_new_vectors > 0
+                        and shards[cand_sid].epochs_since_refresh > self.starvation_cap_epochs
+                    ):
+                        selected_shards.append(cand_sid)
+                        if len(selected_shards) == num_summaries_to_send:
+                            break
+            if len(selected_shards) < num_summaries_to_send:
+                for offset in range(self.num_shards):
+                    cand_sid = (self._rr_cursor + offset) % self.num_shards
+                    if shards[cand_sid].num_new_vectors > 0 and cand_sid not in selected_shards:
+                        selected_shards.append(cand_sid)
+                        if len(selected_shards) == num_summaries_to_send:
+                            break
             if len(selected_shards) < num_summaries_to_send:
                 for offset in range(self.num_shards):
                     cand_sid = (self._rr_cursor + offset) % self.num_shards
@@ -419,11 +466,16 @@ class PolicyController:
                             break
             self._rr_cursor = (self._rr_cursor + num_summaries_to_send) % self.num_shards
         else:
-            # Prefer shards that actually have new vectors since their last published summary,
-            # ordered by descending priority (scaled_score + 0.5 * epochs_waited), tie-broken by shard_id.
             has_new = np.array([1 if s.num_new_vectors > 0 else 0 for s in shards], dtype=np.int64)
             shard_ids = np.arange(self.num_shards, dtype=np.int64)
-            order = np.lexsort((shard_ids, -priorities, -has_new))
+            if self.aging_mode == "starvation_cap":
+                # Starvation cap: any shard waiting > A epochs (with new vectors) is refreshed first,
+                # with ties broken by the rule's score (priorities), then shard_id.
+                is_starved = (ages > self.starvation_cap_epochs).astype(np.int64)
+                order = np.lexsort((shard_ids, -priorities, -is_starved, -has_new))
+            else:
+                # Legacy additive aging: priority = scaled_score + 0.5 * epochs_waited
+                order = np.lexsort((shard_ids, -priorities, -has_new))
             selected_shards = [int(sid) for sid in order[:num_summaries_to_send]]
 
         for sid in selected_shards:

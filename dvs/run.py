@@ -40,9 +40,18 @@ from dvs.metrics import (
     evaluate_epoch_queries,
     paired_bootstrap_ci,
 )
-from dvs.policies import BOUND_POLICIES, PolicyController
+from dvs.policies import (
+    REFERENCE_POLICIES,
+    REFRESH_POLICIES,
+    STARVATION_CAP_EPOCHS,
+    PolicyController,
+)
 from dvs.shards import build_initial_shards
-from dvs.streams import build_epoch_schedule
+from dvs.streams import (
+    build_epoch_schedule,
+    compute_new_topic_query_stats,
+    partition_new_topic_stream,
+)
 
 
 @dataclass
@@ -130,6 +139,8 @@ def run_single_simulation(
     seed: int = 42,
     exact_local_search: bool = False,
     charge_setup_to_budget: bool = False,
+    aging_mode: str = "starvation_cap",
+    starvation_cap_epochs: int = STARVATION_CAP_EPOCHS,
     m_hnsw: int = 16,
     ef_construction: int = 200,
     ef_search: int = 100,
@@ -148,6 +159,22 @@ def run_single_simulation(
                 f"Data leakage detected: a sample query vector is identical to a test query vector (cos={max_cos})"
             )
 
+    new_topic_stats: Optional[Dict[str, Any]] = None
+    if stream_mode == "new_topic":
+        initial_vectors, initial_ids, stream_vectors, stream_ids = partition_new_topic_stream(
+            initial_vectors=initial_vectors,
+            initial_ids=initial_ids,
+            stream_vectors=stream_vectors,
+            stream_ids=stream_ids,
+            seed=seed,
+        )
+        new_topic_stats = compute_new_topic_query_stats(
+            initial_vectors=initial_vectors,
+            stream_vectors=stream_vectors,
+            test_queries=test_queries,
+            k=TOP_K,
+        )
+
     budget_bytes = (
         int(budget_bytes_override)
         if budget_bytes_override is not None
@@ -158,7 +185,7 @@ def run_single_simulation(
     bus = ByteBus(num_shards=num_shards, num_epochs=num_epochs)
 
     # 1. Build initial shards and ground-truth index at setup (epoch -1)
-    max_elems = len(initial_vectors) + num_epochs * inserts_per_epoch + 1024
+    max_elems = len(initial_vectors) + max(num_epochs * inserts_per_epoch, len(stream_vectors)) + 1024
     shards, router = build_initial_shards(
         initial_vectors=initial_vectors,
         initial_ids=initial_ids,
@@ -205,6 +232,8 @@ def run_single_simulation(
         m=m_routed,
         num_epochs=num_epochs,
         charge_setup_to_budget=charge_setup_to_budget,
+        aging_mode=aging_mode,
+        starvation_cap_epochs=starvation_cap_epochs,
     )
 
     schedule = build_epoch_schedule(
@@ -230,7 +259,8 @@ def run_single_simulation(
         epoch = batch.epoch
         timer = CPUTimer()
 
-        # Step A: Insert epoch's new vectors into shards and exact ground-truth index
+        # Step A: Insert epoch's new vectors into shards (method insert CPU)
+        new_shard_ids: Optional[np.ndarray] = None
         with timer.measure("insert"):
             if len(batch.insert_vectors) > 0:
                 new_shard_ids = router.assign_shards(batch.insert_vectors, batch.insert_ids)
@@ -241,36 +271,49 @@ def run_single_simulation(
                             batch.insert_vectors[mask],
                             batch.insert_ids[mask],
                         )
-                gt.add(
-                    vectors=batch.insert_vectors,
-                    doc_ids=batch.insert_ids,
-                    shard_ids=new_shard_ids,
-                    epoch=epoch,
-                )
                 controller.record_new_arrivals(
                     vectors=batch.insert_vectors,
                     doc_ids=batch.insert_ids,
                     shard_ids=new_shard_ids,
                 )
 
-        # Compute exact ground truth for the epoch's test queries (not timed as simulator CPU)
-        gt_ids, _, gt_epochs, gt_shards = gt.search(batch.test_queries, k=TOP_K)
+        # Ground-truth index update and exact search (timed separately, excluded from method CPU)
+        with timer.measure("ground_truth"):
+            if len(batch.insert_vectors) > 0 and new_shard_ids is not None:
+                gt.add(
+                    vectors=batch.insert_vectors,
+                    doc_ids=batch.insert_ids,
+                    shard_ids=new_shard_ids,
+                    epoch=epoch,
+                )
+            gt_ids, _, gt_epochs, gt_shards = gt.search(batch.test_queries, k=TOP_K)
 
         # Step B: Update candidate summaries on shards (timed under summary component)
         with timer.measure("summary"):
-            if policy not in ("all_shards", "extra_search", "push_vectors"):
+            if policy in REFRESH_POLICIES or policy == "always_fresh":
                 for shard in shards:
                     shard.update_candidate_summary(epoch)
 
         # Compute true recovered neighbors per shard BEFORE summaries are refreshed in this epoch
         true_rec_per_shard: Optional[np.ndarray] = None
-        if policy not in ("all_shards", "extra_search", "push_vectors"):
-            true_rec_per_shard = compute_true_recovered_neighbors_per_shard(
+        if policy in REFRESH_POLICIES:
+            with timer.measure("ground_truth"):
+                true_rec_per_shard = compute_true_recovered_neighbors_per_shard(
+                    shards=shards,
+                    coordinator=coordinator,
+                    test_queries=batch.test_queries,
+                    gt_ids=gt_ids,
+                    gt_shards=gt_shards,
+                )
+
+        # For non-RN refresh rules, compute RN estimates outside the policy timer for Spearman logging
+        # so that RN's sample-query probing CPU time is charged only to recovered_neighbor.
+        rn_estimates_outside_timer = None
+        if policy in REFRESH_POLICIES and policy != "recovered_neighbor":
+            rn_estimates_outside_timer = controller.compute_recovered_neighbor_raw_scores(
                 shards=shards,
                 coordinator=coordinator,
-                test_queries=batch.test_queries,
-                gt_ids=gt_ids,
-                gt_shards=gt_shards,
+                sample_queries=sample_queries,
             )
 
         # Step C: Execute policy refresh or adaptation under budget B
@@ -281,13 +324,20 @@ def run_single_simulation(
                 coordinator=coordinator,
                 bus=bus,
                 sample_queries=sample_queries,
-                epoch_test_queries=batch.test_queries,
+                epoch_test_queries=batch.test_queries if policy == "extra_search" else None,
+                rn_estimates=rn_estimates_outside_timer,
             )
 
         spearman_rho = compute_spearman_correlation(
             decision.estimated_recovered_neighbors,
             true_rec_per_shard,
         )
+
+        # For oracle_routing reference, determine ground-truth top-m shards outside method query timer
+        oracle_top_m: Optional[np.ndarray] = None
+        if policy == "oracle_routing":
+            with timer.measure("ground_truth"):
+                oracle_top_m = coordinator.route_queries_oracle(gt_shards, m=m_routed)
 
         # Step D: Route and execute epoch's test queries
         with timer.measure("query"):
@@ -298,6 +348,7 @@ def run_single_simulation(
                 m=m_routed,
                 extra_shards_per_query=decision.extra_shards_per_query,
                 record_popularity=True,
+                override_top_m_shards=oracle_top_m,
             )
 
         # Evaluate accuracy and byte accounting
@@ -325,7 +376,7 @@ def run_single_simulation(
         total_spent = bus.epoch_total_bytes(epoch)
 
         # Enforce strict budget compliance on all budgeted policies
-        if policy not in BOUND_POLICIES and budget_spent > budget_bytes:
+        if policy not in REFERENCE_POLICIES and budget_spent > budget_bytes:
             raise AssertionError(
                 f"Policy '{policy}' exceeded budget in epoch {epoch}: spent {budget_spent} > B={budget_bytes}"
             )
@@ -338,6 +389,7 @@ def run_single_simulation(
             "stream_mode": stream_mode,
             "bursts": bursts,
             "sharding_mode": sharding_mode,
+            "aging_mode": aging_mode,
             "num_shards": num_shards,
             "m": m,
             "m_routed": m_routed,
@@ -385,6 +437,7 @@ def run_single_simulation(
             "cpu_policy_s": timer.times["policy"],
             "cpu_query_s": timer.times["query"],
             "cpu_total_s": timer.total,
+            "cpu_ground_truth_s": timer.times["ground_truth"],
         }
         epoch_rows.append(row)
 
@@ -394,6 +447,12 @@ def run_single_simulation(
     concat_missed = np.concatenate(all_q_missed) if all_q_missed else np.empty(0, dtype=np.int64)
 
     valid_recent = concat_recent[np.isfinite(concat_recent)]
+    spearman_n_defined = int(epochs_df["spearman_rho"].notna().sum())
+    spearman_rho_mean = (
+        float(epochs_df["spearman_rho"].mean(skipna=True))
+        if spearman_n_defined > 0
+        else float("nan")
+    )
     summary = {
         "run_id": run_id,
         "policy": policy,
@@ -401,6 +460,8 @@ def run_single_simulation(
         "stream_mode": stream_mode,
         "bursts": bursts,
         "sharding_mode": sharding_mode,
+        "aging_mode": aging_mode,
+        "starvation_cap_epochs": int(starvation_cap_epochs),
         "num_shards": num_shards,
         "c": c,
         "m": m,
@@ -412,6 +473,23 @@ def run_single_simulation(
         "recent_window_w": recent_window_w,
         "exact_local_search": exact_local_search,
         "charge_setup_to_budget": charge_setup_to_budget,
+        "initial_set_size": int(len(initial_vectors)),
+        "stream_set_size": int(len(stream_vectors)),
+        "queries_with_most_neighbors_in_stream": (
+            int(new_topic_stats["queries_with_most_neighbors_in_stream"])
+            if new_topic_stats is not None
+            else None
+        ),
+        "queries_with_at_least_half_neighbors_in_stream": (
+            int(new_topic_stats["queries_with_at_least_half_neighbors_in_stream"])
+            if new_topic_stats is not None
+            else None
+        ),
+        "mean_stream_neighbors_in_top_10": (
+            float(new_topic_stats["mean_stream_neighbors_in_top_k"])
+            if new_topic_stats is not None
+            else None
+        ),
         "overall_recall_at_10_mean": float(np.mean(concat_recall)) if len(concat_recall) > 0 else 0.0,
         "epoch_recall_at_10_mean": float(epochs_df["recall_at_10"].mean()),
         "recent_recall_at_10_query_mean": (
@@ -427,7 +505,8 @@ def run_single_simulation(
             float(np.mean(concat_missed)) if len(concat_missed) > 0 else 0.0
         ),
         "missed_neighbors_total": int(epochs_df["missed_neighbors_total"].sum()),
-        "spearman_rho_mean": float(epochs_df["spearman_rho"].mean()),
+        "spearman_rho_mean": spearman_rho_mean,
+        "spearman_n_defined": spearman_n_defined,
         "setup_sample_vectors_bytes": int(bus.setup_sample_vectors_bytes),
         "setup_sample_vectors_per_shard_bytes": (
             SETUP_SAMPLE_VECTORS_PER_SHARD_BYTES if policy == "recovered_neighbor" else 0
@@ -451,6 +530,7 @@ def run_single_simulation(
         "cpu_policy_s_total": float(epochs_df["cpu_policy_s"].sum()),
         "cpu_query_s_total": float(epochs_df["cpu_query_s"].sum()),
         "cpu_total_s": float(epochs_df["cpu_total_s"].sum()),
+        "cpu_ground_truth_s_total": float(epochs_df["cpu_ground_truth_s"].sum()),
     }
 
     cfg_dict = {
@@ -467,6 +547,8 @@ def run_single_simulation(
         "stream_mode": stream_mode,
         "bursts": bursts,
         "sharding_mode": sharding_mode,
+        "aging_mode": aging_mode,
+        "starvation_cap_epochs": int(starvation_cap_epochs),
         "seed": seed,
         "exact_local_search": exact_local_search,
         "charge_setup_to_budget": charge_setup_to_budget,
@@ -573,86 +655,141 @@ def run_from_config(
 
     num_epochs = int(cfg.get("num_epochs", 50))
     inserts_per_epoch = int(cfg.get("inserts_per_epoch", 1000))
-    recent_window_w = int(cfg.get("recent_window_w", 2))
     c = int(cfg.get("c", SUMMARY_CENTERS))
-    bursts = bool(cfg.get("bursts", False))
-    sharding_mode = str(cfg.get("sharding_mode", "kmeans"))
     exact_local_search = bool(cfg.get("exact_local_search", False))
-    charge_setup_to_budget = bool(cfg.get("charge_setup_to_budget", False))
+    starvation_cap_epochs = int(cfg.get("starvation_cap_epochs", STARVATION_CAP_EPOCHS))
+
+    # Support either explicit single-factor condition dicts or sweep lists over condition flags
+    raw_conditions = cfg.get("conditions")
+    if isinstance(raw_conditions, list) and len(raw_conditions) > 0:
+        condition_specs: List[Dict[str, Any]] = []
+        for cond in raw_conditions:
+            condition_specs.append(
+                {
+                    "recent_window_w": int(cond.get("recent_window_w", cfg.get("recent_window_w", 2))),
+                    "bursts": bool(cond.get("bursts", cfg.get("bursts", False))),
+                    "sharding_mode": str(cond.get("sharding_mode", cfg.get("sharding_mode", "kmeans"))),
+                    "charge_setup_to_budget": bool(
+                        cond.get("charge_setup_to_budget", cfg.get("charge_setup_to_budget", False))
+                    ),
+                    "aging_mode": str(cond.get("aging_mode", cfg.get("aging_mode", "starvation_cap"))),
+                }
+            )
+    else:
+        w_list = [int(x) for x in _as_list(cfg.get("recent_window_w", 2))]
+        bursts_list = [bool(x) for x in _as_list(cfg.get("bursts", False))]
+        sharding_list = [str(x) for x in _as_list(cfg.get("sharding_mode", "kmeans"))]
+        charge_setup_list = [bool(x) for x in _as_list(cfg.get("charge_setup_to_budget", False))]
+        aging_list = [str(x) for x in _as_list(cfg.get("aging_mode", "starvation_cap"))]
+        condition_specs = [
+            {
+                "recent_window_w": w_val,
+                "bursts": b_val,
+                "sharding_mode": sh_val,
+                "charge_setup_to_budget": cs_val,
+                "aging_mode": ag_val,
+            }
+            for w_val in w_list
+            for b_val in bursts_list
+            for sh_val in sharding_list
+            for cs_val in charge_setup_list
+            for ag_val in aging_list
+        ]
 
     results: List[SimulationRunResult] = []
-    for stream_mode in streams_list:
-        for s_count in shards_list:
-            for m_val in m_list:
-                for b_sum in budgets_list:
-                    for q_val in q_list:
-                        for seed in seeds_list:
-                            for pol in policies:
-                                run_id = (
-                                    f"{pol}_S{s_count}_m{m_val}_B{b_sum}_Q{q_val}"
-                                    f"_{stream_mode}_seed{seed}"
-                                )
-                                res = run_single_simulation(
-                                    initial_vectors=init_vecs,
-                                    initial_ids=init_ids,
-                                    stream_vectors=stream_vecs,
-                                    stream_ids=stream_ids,
-                                    test_queries=test_q,
-                                    test_query_ids=test_qids,
-                                    sample_queries=sample_q,
-                                    sample_query_ids=sample_qids,
-                                    policy=str(pol),
-                                    num_shards=int(s_count),
-                                    c=c,
-                                    m=int(m_val),
-                                    budget_summaries=int(b_sum),
-                                    num_epochs=num_epochs,
-                                    inserts_per_epoch=inserts_per_epoch,
-                                    queries_per_epoch=int(q_val),
-                                    recent_window_w=recent_window_w,
-                                    stream_mode=str(stream_mode),
-                                    bursts=bursts,
-                                    sharding_mode=sharding_mode,
-                                    seed=int(seed),
-                                    exact_local_search=exact_local_search,
-                                    charge_setup_to_budget=charge_setup_to_budget,
-                                    run_id=run_id,
-                                )
-                                run_dir = exp_out_dir / run_id
-                                save_run_outputs(
-                                    result=res,
-                                    out_dir=run_dir,
-                                    repo_root=repo_root,
-                                    config_raw_bytes=raw_bytes,
-                                    data_provenance_path=data_dir / "PROVENANCE.json",
-                                )
-                                results.append(res)
+    for cond in condition_specs:
+        recent_window_w = cond["recent_window_w"]
+        bursts = cond["bursts"]
+        sharding_mode = cond["sharding_mode"]
+        charge_setup_to_budget = cond["charge_setup_to_budget"]
+        aging_mode = cond["aging_mode"]
+        for stream_mode in streams_list:
+            for s_count in shards_list:
+                for m_val in m_list:
+                    for b_sum in budgets_list:
+                        for q_val in q_list:
+                            for seed in seeds_list:
+                                for pol in policies:
+                                    # When sweeping charge_setup_to_budget across [false, true],
+                                    # only recovered_neighbor has setup sample vectors to charge.
+                                    if (
+                                        charge_setup_to_budget
+                                        and len(condition_specs) > 1
+                                        and str(pol) != "recovered_neighbor"
+                                        and not bool(cfg.get("run_all_policies_when_setup_charged", False))
+                                    ):
+                                        continue
+                                    run_id = (
+                                        f"{pol}_S{s_count}_m{m_val}_B{b_sum}_Q{q_val}"
+                                        f"_{stream_mode}_W{recent_window_w}_{sharding_mode}"
+                                        f"_bursts{int(bursts)}_setup{int(charge_setup_to_budget)}"
+                                        f"_{aging_mode}_seed{seed}"
+                                    )
+                                    res = run_single_simulation(
+                                        initial_vectors=init_vecs,
+                                        initial_ids=init_ids,
+                                        stream_vectors=stream_vecs,
+                                        stream_ids=stream_ids,
+                                        test_queries=test_q,
+                                        test_query_ids=test_qids,
+                                        sample_queries=sample_q,
+                                        sample_query_ids=sample_qids,
+                                        policy=str(pol),
+                                        num_shards=int(s_count),
+                                        c=c,
+                                        m=int(m_val),
+                                        budget_summaries=int(b_sum),
+                                        num_epochs=num_epochs,
+                                        inserts_per_epoch=inserts_per_epoch,
+                                        queries_per_epoch=int(q_val),
+                                        recent_window_w=recent_window_w,
+                                        stream_mode=str(stream_mode),
+                                        bursts=bursts,
+                                        sharding_mode=sharding_mode,
+                                        seed=int(seed),
+                                        exact_local_search=exact_local_search,
+                                        charge_setup_to_budget=charge_setup_to_budget,
+                                        aging_mode=aging_mode,
+                                        starvation_cap_epochs=starvation_cap_epochs,
+                                        run_id=run_id,
+                                    )
+                                    run_dir = exp_out_dir / run_id
+                                    save_run_outputs(
+                                        result=res,
+                                        out_dir=run_dir,
+                                        repo_root=repo_root,
+                                        config_raw_bytes=raw_bytes,
+                                        data_provenance_path=data_dir / "PROVENANCE.json",
+                                    )
+                                    results.append(res)
 
     # Also write an experiment-level summary table and paired bootstrap comparisons if recovered_neighbor is present
     if results:
         all_summaries = [r.summary for r in results]
         pd.DataFrame(all_summaries).to_parquet(exp_out_dir / "experiment_summary.parquet", index=False)
 
-        bootstrap_comparisons: List[Dict[str, Any]] = []
-        rn_runs = {
-            (
+        def _group_key(r: SimulationRunResult) -> Tuple[Any, ...]:
+            return (
                 r.config["num_shards"],
                 r.config["m"],
                 r.config["budget_summaries"],
                 r.config["queries_per_epoch"],
                 r.config["stream_mode"],
-            ): []
+                r.config["sharding_mode"],
+                r.config["bursts"],
+                r.config["charge_setup_to_budget"],
+                r.config["recent_window_w"],
+                r.config["aging_mode"],
+            )
+
+        bootstrap_comparisons: List[Dict[str, Any]] = []
+        rn_runs: Dict[Tuple[Any, ...], List[SimulationRunResult]] = {
+            _group_key(r): []
             for r in results
             if r.config["policy"] == "recovered_neighbor"
         }
         for r in results:
-            key = (
-                r.config["num_shards"],
-                r.config["m"],
-                r.config["budget_summaries"],
-                r.config["queries_per_epoch"],
-                r.config["stream_mode"],
-            )
+            key = _group_key(r)
             if r.config["policy"] == "recovered_neighbor" and key in rn_runs:
                 rn_runs[key].append(r)
 
@@ -664,15 +801,7 @@ def run_from_config(
                 {
                     r.config["policy"]
                     for r in results
-                    if (
-                        r.config["num_shards"],
-                        r.config["m"],
-                        r.config["budget_summaries"],
-                        r.config["queries_per_epoch"],
-                        r.config["stream_mode"],
-                    )
-                    == key
-                    and r.config["policy"] != "recovered_neighbor"
+                    if _group_key(r) == key and r.config["policy"] != "recovered_neighbor"
                 }
             )
             for op in other_policies:
@@ -680,15 +809,7 @@ def run_from_config(
                     [
                         r
                         for r in results
-                        if (
-                            r.config["num_shards"],
-                            r.config["m"],
-                            r.config["budget_summaries"],
-                            r.config["queries_per_epoch"],
-                            r.config["stream_mode"],
-                        )
-                        == key
-                        and r.config["policy"] == op
+                        if _group_key(r) == key and r.config["policy"] == op
                     ],
                     key=lambda x: x.config["seed"],
                 )
@@ -704,6 +825,11 @@ def run_from_config(
                             "budget_summaries": key[2],
                             "queries_per_epoch": key[3],
                             "stream_mode": key[4],
+                            "sharding_mode": key[5],
+                            "bursts": key[6],
+                            "charge_setup_to_budget": key[7],
+                            "recent_window_w": key[8],
+                            "aging_mode": key[9],
                             "baseline_policy": op,
                             "recent_recall_diff_mean": ci_rec["mean_diff"],
                             "recent_recall_ci95_low": ci_rec["ci_low"],

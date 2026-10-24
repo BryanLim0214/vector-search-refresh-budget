@@ -1,0 +1,28 @@
+experiment: pilot
+description: "Pilot (1 seed, S=32, m=2, c=16, Q=200, B=4 summaries, full data) on steady and new_topic"
+num_shards: [32]
+c: 16
+m: [2]
+budget_summaries: [4]
+num_epochs: 50
+inserts_per_epoch: 1000
+queries_per_epoch: [200]
+recent_window_w: 2
+stream_modes:
+  - steady
+  - new_topic
+bursts: false
+sharding_mode: kmeans
+charge_setup_to_budget: false
+aging_mode: starvation_cap
+seeds: [42]
+policies:
+  - never_refresh
+  - always_fresh
+  - oracle_routing
+  - all_shards
+  - round_robin
+  - data_change
+  - recovered_neighbor
+  - extra_search
+  - push_vectors
