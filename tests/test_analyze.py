@@ -254,6 +254,10 @@ def _write_synthetic_run(
     summary = {
         **cfg_dict,
         "run_id": run_id,
+        "initial_set_size": 47273 if stream_mode == "new_topic" else 50000,
+        "stream_set_size": 52727 if stream_mode == "new_topic" else 50000,
+        "queries_with_most_neighbors_in_stream": 505 if stream_mode == "new_topic" else None,
+        "mean_stream_neighbors_in_top_10": 5.175 if stream_mode == "new_topic" else None,
         "overall_recall_at_10_mean": float(np.mean(q_recall)),
         "recent_recall_at_10_query_mean": float(np.nanmean(q_recent)),
         "total_queries_evaluated": n_queries,
@@ -1342,4 +1346,361 @@ def test_link_results_combined_analysis_root(
             if main_d.exists():
                 for child in list(main_d.iterdir()):
                     _remove_existing_destination(child)
+
+
+def test_analyze_add3_dry_run(
+    synth_results_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Dry test for analysis/analyze_add3.py on synthetic inputs in tmp_path (M3 X1-X3, M1 X4,
+    stricter replication checks, stop rules, and L-5 pairing identity guards)."""
+    from analysis.analyze_add3 import analyze_add3, verify_replication_run
+
+    configs_dir = REPO_ROOT / "configs"
+    grid_charged_m3 = load_expected_grid(configs_dir / "add3_M3_dc_charged.yaml", "addendum3/M3_dc_charged")
+    assert grid_charged_m3["charge_dc_scores_to_budget"] is True
+    assert len(grid_charged_m3["expected_cells"]) == 30
+
+    grid_charged_m1 = load_expected_grid(configs_dir / "add3_M1_dc_charged.yaml", "addendum3/M1_dc_charged")
+    assert grid_charged_m1["charge_dc_scores_to_budget"] is True
+    assert len(grid_charged_m1["expected_cells"]) == 10
+
+    charged_dir = tmp_path / "addendum3" / "M3_dc_charged"
+    m1_charged_dir = tmp_path / "addendum3" / "M1_dc_charged"
+    m3_dir = synth_results_root / "main" / "M3"
+    m1_dir = synth_results_root / "main" / "M1"
+    m1_online_dir = synth_results_root / "main" / "M1_online"
+    rep_dir = tmp_path / "addendum3" / "replication"
+    m1_rep_dir = tmp_path / "addendum3" / "M1_replication"
+    out_dir = tmp_path / "addendum3" / "out"
+
+    expected_k = {2: 1, 4: 3, 8: 7}
+    expected_cap = {2: 64, 4: 22, 8: 10}
+
+    def _populate_charged_grid(
+        grid_spec: Dict[str, Any],
+        target_dir: Path,
+        exp_label: str,
+        nt_b4_mean: float,
+    ) -> None:
+        for (stream, _placement, b_sum, q_val, _cap_mode, pol, seed), rid in grid_spec[
+            "expected_cells"
+        ].items():
+            assert rid.endswith("_dcscore1")
+            _write_synthetic_run(
+                run_dir=target_dir / rid,
+                run_id=rid,
+                exp_label=exp_label,
+                grid_spec=grid_spec,
+                stream_mode=stream,
+                b_sum=b_sum,
+                q_val=q_val,
+                policy=pol,
+                seed=seed,
+                override_recent_mean=nt_b4_mean if (stream == "new_topic" and b_sum == 4) else None,
+            )
+            run_folder = target_dir / rid
+            ep_df = pd.read_parquet(run_folder / "epochs.parquet")
+            k_val = expected_k[b_sum]
+            ep_df["num_summaries_refreshed"] = k_val
+            ep_df["num_forced_by_cap"] = 1
+            ep_df["bytes_summary_refresh"] = k_val * 24576
+            ep_df["budget_bytes_spent"] = k_val * 24576 + 128
+            ep_df.to_parquet(run_folder / "epochs.parquet", index=False)
+
+            s_path = run_folder / "summary.json"
+            s_data = json.loads(s_path.read_text(encoding="utf-8"))
+            if stream == "new_topic" and b_sum == 4:
+                q_path = run_folder / "queries.npz"
+                with np.load(q_path, allow_pickle=False) as qz:
+                    q_rec_old = qz["recall_at_10"]
+                    q_miss_old = qz["missed_neighbors"]
+                seed_offset = (int(seed) - 44) * 0.001
+                q_idx = np.arange(32, dtype=np.float64)
+                q_jit = ((q_idx % 4) - 1.5) * 0.002
+                q_rec_new = np.empty(40, dtype=np.float64)
+                q_rec_new[:32] = float(nt_b4_mean) + seed_offset + q_jit
+                q_rec_new[32:] = np.nan
+                np.savez_compressed(
+                    q_path,
+                    recall_at_10=q_rec_old,
+                    recent_recall_at_10=q_rec_new,
+                    missed_neighbors=q_miss_old,
+                )
+                s_data["recent_recall_at_10_query_mean"] = float(np.nanmean(q_rec_new))
+            s_data["charge_dc_scores_to_budget"] = True
+            s_data["starvation_cap_epochs"] = expected_cap[b_sum]
+            s_data["total_summaries_refreshed"] = k_val * 50
+            s_data["total_budget_bytes_spent"] = (k_val * 24576 + 128) * 50
+            s_path.write_text(json.dumps(s_data), encoding="utf-8")
+
+            p_path = run_folder / "provenance.json"
+            p_data = json.loads(p_path.read_text(encoding="utf-8"))
+            p_data["config"]["charge_dc_scores_to_budget"] = True
+            p_data["config"]["starvation_cap_epochs"] = expected_cap[b_sum]
+            p_path.write_text(json.dumps(p_data), encoding="utf-8")
+
+    _populate_charged_grid(grid_charged_m3, charged_dir, "addendum3/M3_dc_charged", nt_b4_mean=0.675)
+    _populate_charged_grid(grid_charged_m1, m1_charged_dir, "addendum3/M1_dc_charged", nt_b4_mean=0.610)
+
+    # Create M3 and M1 replication runs from stored M3 and M1 runs, adding charge_dc_scores_to_budget: false
+    # and different CPU times to verify non-CPU exact comparison and flag-key exclusion
+    rep_rid = (
+        "data_change_S32_m2_B4_Q200_new_topic_time_segment_g_W2_kmeans_bursts0_setup0_starvation_cap_arith_seed42"
+    )
+    m1_rep_rid = (
+        "data_change_S32_m2_B4_Q800_new_topic_nearest_initial_W2_kmeans_bursts0_setup0_starvation_cap_arith_seed42"
+    )
+    for src_d, dst_d, r_id in [
+        (m3_dir, rep_dir, rep_rid),
+        (m1_dir, m1_rep_dir, m1_rep_rid),
+    ]:
+        shutil.copytree(src_d / r_id, dst_d / r_id)
+        s_p = dst_d / r_id / "summary.json"
+        s_d = json.loads(s_p.read_text(encoding="utf-8"))
+        s_d["charge_dc_scores_to_budget"] = False
+        s_d["cpu_total_s"] = 99.99
+        s_p.write_text(json.dumps(s_d), encoding="utf-8")
+
+        p_p = dst_d / r_id / "provenance.json"
+        p_d = json.loads(p_p.read_text(encoding="utf-8"))
+        p_d["config"]["charge_dc_scores_to_budget"] = False
+        p_p.write_text(json.dumps(p_d), encoding="utf-8")
+
+    res = analyze_add3(
+        charged_dir=charged_dir,
+        m3_dir=m3_dir,
+        out_dir=out_dir,
+        replication_dir=rep_dir,
+        configs_dir=configs_dir,
+        m1_charged_dir=m1_charged_dir,
+        m1_dir=m1_dir,
+        m1_online_dir=m1_online_dir,
+        m1_replication_dir=m1_rep_dir,
+    )
+
+    assert (out_dir / "replication_check.csv").exists()
+    assert (out_dir / "add3_conditions.csv").exists()
+    assert (out_dir / "add3_paired_comparisons.csv").exists()
+    assert (out_dir / "add3_dc_charged_epochs.csv").exists()
+
+    df_rep = res["replication_check"]
+    assert len(df_rep) == 2
+    assert (df_rep["status"] == "PASS").all()
+    assert bool(df_rep["recent_recall_exact_match"].all()) is True
+    assert bool(df_rep["overall_recall_exact_match"].all()) is True
+    assert bool(df_rep["queries_npz_exact_match"].all()) is True
+    assert bool(df_rep["epoch_non_cpu_exact_match"].all()) is True
+    assert bool(df_rep["summary_non_cpu_exact_match"].all()) is True
+
+    df_ep = res["add3_dc_charged_epochs"]
+    assert len(df_ep) == 40  # 30 M3 + 10 M1
+    assert bool(df_ep["verified_k_and_overhead"].all()) is True
+
+    df_paired = res["add3_paired_comparisons"]
+    assert len(df_paired) == 32  # 24 M3 (X1, X2, X3) + 8 M1 (X4)
+    assert set(df_paired["comparison_group"]) == {"X1", "X2", "X3", "X4"}
+    assert (df_paired["status"] == "COMPLETE").all()
+    assert "recent_diff_t_ci95_low" in df_paired.columns
+    assert "overall_diff_t_ci95_low" in df_paired.columns
+    assert set(df_paired["prediction_id"]) == {"", "P1", "P2"}
+
+    # L-6: Verify exact value and sign of X1 new_topic B=4 recent_diff_mean (0.675 - synthetic RN recent mean to 1e-12)
+    x1_nt_b4 = df_paired[
+        (df_paired["comparison_group"] == "X1")
+        & (df_paired["stream_mode"] == "new_topic")
+        & (df_paired["budget_summaries"] == 4)
+    ].iloc[0]
+    expected_rn_rec = float(x1_nt_b4["recent_mean_b"])
+    assert abs(float(x1_nt_b4["recent_mean_a"]) - 0.675) < 1e-12
+    assert abs(float(x1_nt_b4["recent_diff_mean"]) - (0.675 - expected_rn_rec)) < 1e-12
+    assert float(x1_nt_b4["recent_diff_mean"]) < 0.0
+    assert "decided by two-stage paired bootstrap 95% CI" in str(x1_nt_b4["prediction_note"])
+
+    # Verify X4 rows (4 comparisons * 2 streams = 8 rows at Q=800, B=4, nearest_initial)
+    df_x4 = df_paired[df_paired["comparison_group"] == "X4"]
+    assert len(df_x4) == 8
+    assert set(df_x4["placement_mode"]) == {"nearest_initial"}
+    assert set(df_x4["queries_per_epoch"]) == {800}
+    assert set(df_x4["budget_summaries"]) == {4}
+    assert set(df_x4["comparison_label"]) == {
+        "charged_dc - extra_search",
+        "charged_dc - push_vectors",
+        "charged_dc - extra_search_online",
+        "charged_dc - uncharged_dc",
+    }
+    for _, x4_row in df_x4.iterrows():
+        assert (
+            abs(
+                float(x4_row["recent_diff_mean"])
+                - (float(x4_row["recent_mean_a"]) - float(x4_row["recent_mean_b"]))
+            )
+            < 1e-12
+        )
+    x4_nt = df_x4[df_x4["stream_mode"] == "new_topic"].set_index("comparison_label")
+    for comp_lbl in (
+        "charged_dc - extra_search",
+        "charged_dc - push_vectors",
+        "charged_dc - extra_search_online",
+        "charged_dc - uncharged_dc",
+    ):
+        r_b = float(x4_nt.loc[comp_lbl, "recent_mean_b"])
+        assert abs(float(x4_nt.loc[comp_lbl, "recent_diff_mean"]) - (0.610 - r_b)) < 1e-12
+        assert float(x4_nt.loc[comp_lbl, "recent_diff_mean"]) > 0.0
+
+    # CLI execution check
+    cli_out = tmp_path / "addendum3" / "cli_out"
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "analysis" / "analyze_add3.py"),
+            "--charged-dir",
+            str(charged_dir),
+            "--m3-dir",
+            str(m3_dir),
+            "--replication-dir",
+            str(rep_dir),
+            "--m1-charged-dir",
+            str(m1_charged_dir),
+            "--m1-dir",
+            str(m1_dir),
+            "--m1-online-dir",
+            str(m1_online_dir),
+            "--m1-replication-dir",
+            str(m1_rep_dir),
+            "--out-dir",
+            str(cli_out),
+        ],
+        check=True,
+    )
+    assert (cli_out / "add3_paired_comparisons.csv").exists()
+
+    # Stop rule 1: Missing M3 or M1 replication directory must raise ValueError and write no outputs
+    missing_out_m3 = tmp_path / "addendum3" / "missing_out_m3"
+    with pytest.raises(ValueError, match="replication run missing"):
+        analyze_add3(
+            charged_dir=charged_dir,
+            m3_dir=m3_dir,
+            out_dir=missing_out_m3,
+            replication_dir=tmp_path / "nonexistent_rep",
+            configs_dir=configs_dir,
+            m1_charged_dir=m1_charged_dir,
+            m1_dir=m1_dir,
+            m1_online_dir=m1_online_dir,
+            m1_replication_dir=m1_rep_dir,
+        )
+    assert not missing_out_m3.exists()
+
+    missing_out_m1 = tmp_path / "addendum3" / "missing_out_m1"
+    with pytest.raises(ValueError, match="replication run missing"):
+        analyze_add3(
+            charged_dir=charged_dir,
+            m3_dir=m3_dir,
+            out_dir=missing_out_m1,
+            replication_dir=rep_dir,
+            configs_dir=configs_dir,
+            m1_charged_dir=m1_charged_dir,
+            m1_dir=m1_dir,
+            m1_online_dir=m1_online_dir,
+            m1_replication_dir=tmp_path / "nonexistent_m1_rep",
+        )
+    assert not missing_out_m1.exists()
+
+    # Stop rule 2: Corrupting queries.npz, epochs.parquet, or summary.json in replication must fail
+    # (a) Corrupt missed_neighbors in queries.npz
+    q_npz_path = rep_dir / rep_rid / "queries.npz"
+    q_npz_bak = tmp_path / "q_npz_bak.npz"
+    shutil.copy2(q_npz_path, q_npz_bak)
+    with np.load(q_npz_bak, allow_pickle=False) as qz:
+        bad_missed = qz["missed_neighbors"].copy()
+        bad_missed[0] += 1
+        np.savez_compressed(
+            q_npz_path,
+            recall_at_10=qz["recall_at_10"],
+            recent_recall_at_10=qz["recent_recall_at_10"],
+            missed_neighbors=bad_missed,
+        )
+    bad_q_out = tmp_path / "addendum3" / "bad_q_out"
+    with pytest.raises(ValueError, match="Replication check FAILED"):
+        analyze_add3(
+            charged_dir=charged_dir,
+            m3_dir=m3_dir,
+            out_dir=bad_q_out,
+            replication_dir=rep_dir,
+            configs_dir=configs_dir,
+            m1_charged_dir=m1_charged_dir,
+            m1_dir=m1_dir,
+            m1_online_dir=m1_online_dir,
+            m1_replication_dir=m1_rep_dir,
+        )
+    assert not bad_q_out.exists()
+    shutil.copy2(q_npz_bak, q_npz_path)
+
+    # (b) Corrupt a non-CPU column in epochs.parquet
+    ep_path = rep_dir / rep_rid / "epochs.parquet"
+    ep_bak = tmp_path / "ep_bak.parquet"
+    shutil.copy2(ep_path, ep_bak)
+    ep_bad = pd.read_parquet(ep_path)
+    ep_bad.loc[0, "spearman_rho_new_vecs"] = 0.999999
+    ep_bad.to_parquet(ep_path, index=False)
+    with pytest.raises(ValueError, match="Replication check FAILED"):
+        verify_replication_run(replication_dir=rep_dir, m3_dir=m3_dir, configs_dir=configs_dir)
+    shutil.copy2(ep_bak, ep_path)
+
+    # (c) Corrupt a non-CPU key in summary.json
+    rep_s_path = rep_dir / rep_rid / "summary.json"
+    rep_s_bak = tmp_path / "rep_s_bak.json"
+    shutil.copy2(rep_s_path, rep_s_bak)
+    rep_s_data = json.loads(rep_s_path.read_text(encoding="utf-8"))
+    rep_s_data["missed_neighbors_total"] = 999999
+    rep_s_path.write_text(json.dumps(rep_s_data), encoding="utf-8")
+    with pytest.raises(ValueError, match="Replication check FAILED"):
+        verify_replication_run(replication_dir=rep_dir, m3_dir=m3_dir, configs_dir=configs_dir)
+    shutil.copy2(rep_s_bak, rep_s_path)
+
+    # L-5: Corrupting data_provenance_sha256 or summary ground-truth count in a paired run must raise ValueError
+    m1_seed42_rid = grid_charged_m1["expected_cells"][
+        ("new_topic", "nearest_initial", 4, 800, "arithmetic", "data_change", 42)
+    ]
+    p_m1_path = m1_charged_dir / m1_seed42_rid / "provenance.json"
+    p_m1_bak = tmp_path / "p_m1_bak.json"
+    shutil.copy2(p_m1_path, p_m1_bak)
+    p_m1_data = json.loads(p_m1_path.read_text(encoding="utf-8"))
+    p_m1_data["data_provenance_sha256"] = "corrupted_sha"
+    p_m1_path.write_text(json.dumps(p_m1_data), encoding="utf-8")
+    with pytest.raises(ValueError, match=m1_seed42_rid):
+        analyze_add3(
+            charged_dir=charged_dir,
+            m3_dir=m3_dir,
+            out_dir=tmp_path / "addendum3" / "bad_l5_sha",
+            replication_dir=rep_dir,
+            configs_dir=configs_dir,
+            m1_charged_dir=m1_charged_dir,
+            m1_dir=m1_dir,
+            m1_online_dir=m1_online_dir,
+            m1_replication_dir=m1_rep_dir,
+        )
+    shutil.copy2(p_m1_bak, p_m1_path)
+
+    s_m1_path = m1_charged_dir / m1_seed42_rid / "summary.json"
+    s_m1_bak = tmp_path / "s_m1_bak.json"
+    shutil.copy2(s_m1_path, s_m1_bak)
+    s_m1_data = json.loads(s_m1_path.read_text(encoding="utf-8"))
+    s_m1_data["initial_set_size"] = 12345
+    s_m1_path.write_text(json.dumps(s_m1_data), encoding="utf-8")
+    with pytest.raises(ValueError, match=m1_seed42_rid):
+        analyze_add3(
+            charged_dir=charged_dir,
+            m3_dir=m3_dir,
+            out_dir=tmp_path / "addendum3" / "bad_l5_sum",
+            replication_dir=rep_dir,
+            configs_dir=configs_dir,
+            m1_charged_dir=m1_charged_dir,
+            m1_dir=m1_dir,
+            m1_online_dir=m1_online_dir,
+            m1_replication_dir=m1_rep_dir,
+        )
+    shutil.copy2(s_m1_bak, s_m1_path)
+
+
 

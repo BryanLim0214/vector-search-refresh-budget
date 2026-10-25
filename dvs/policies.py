@@ -28,6 +28,7 @@ import numpy as np
 
 from dvs.bus import (
     ByteBus,
+    DC_SCORE_BYTES_PER_SHARD,
     PUSH_VECTOR_BYTES,
     SAMPLE_QUERIES_COUNT,
     SETUP_SAMPLE_VECTORS_PER_SHARD_BYTES,
@@ -122,6 +123,7 @@ class PolicyController:
         m: int,
         num_epochs: int = 50,
         charge_setup_to_budget: bool = False,
+        charge_dc_scores_to_budget: bool = False,
         aging_mode: str = "starvation_cap",
         starvation_cap_epochs: Optional[int] = None,
         aging_per_epoch: float = AGING_PER_EPOCH,
@@ -136,6 +138,7 @@ class PolicyController:
         self.m = int(m)
         self.num_epochs = int(num_epochs)
         self.charge_setup_to_budget = bool(charge_setup_to_budget)
+        self.charge_dc_scores_to_budget = bool(charge_dc_scores_to_budget)
         self.aging_mode = str(aging_mode)
         self.starvation_cap_epochs: Optional[int] = (
             int(starvation_cap_epochs) if starvation_cap_epochs is not None else None
@@ -173,6 +176,8 @@ class PolicyController:
                 total_setup = SETUP_SAMPLE_VECTORS_PER_SHARD_BYTES * self.num_shards
                 amortized_setup = (total_setup + self.num_epochs - 1) // self.num_epochs
             rem -= rn_overhead + amortized_setup
+        elif self.policy == "data_change" and self.charge_dc_scores_to_budget:
+            rem -= DC_SCORE_BYTES_PER_SHARD * self.num_shards
         return min(self.num_shards, max(0, rem // SUMMARY_BYTES))
 
     def effective_starvation_cap(self, num_sample_queries: int = SAMPLE_QUERIES_COUNT) -> int:
@@ -571,6 +576,20 @@ class PolicyController:
             decision.overhead_bytes = total_overhead
             raw_scores = rn_raw
         elif self.policy == "data_change":
+            if self.charge_dc_scores_to_budget:
+                dc_overhead = DC_SCORE_BYTES_PER_SHARD * self.num_shards
+                if remaining_budget < dc_overhead:
+                    return decision
+                bus.log(
+                    epoch=epoch,
+                    category="data_change_score_messages",
+                    num_bytes=dc_overhead,
+                    src="shards",
+                    dst="coordinator",
+                    charged_to_budget=True,
+                )
+                remaining_budget -= dc_overhead
+                decision.overhead_bytes = dc_overhead
             raw_scores = self.compute_data_change_raw_scores(shards)
         elif self.policy == "ql":
             raw_scores = coordinator.past_top_m_counts.astype(np.float64)

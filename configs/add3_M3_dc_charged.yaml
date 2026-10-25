@@ -1,0 +1,24 @@
+experiment: addendum3/M3_dc_charged
+description: "Addendum 3 (exploratory, post hoc): M3 multi-segment arrival placement (time_segment_g, G=8) with data_change score messages charged to the byte budget (charge_dc_scores_to_budget: true), streams steady and new_topic, B in {2, 4, 8}, Q=200, S=32, m=2, c=16, W=2, starvation cap by arithmetic, 5 seeds"
+num_shards: [32]
+c: 16
+m: [2]
+budget_summaries: [2, 4, 8]
+num_epochs: 50
+inserts_per_epoch: 1000
+queries_per_epoch: [200]
+recent_window_w: 2
+stream_modes:
+  - steady
+  - new_topic
+placement_mode: time_segment_g
+active_segments: 8
+bursts: false
+sharding_mode: kmeans
+charge_setup_to_budget: false
+charge_dc_scores_to_budget: true
+aging_mode: starvation_cap
+starvation_cap_epochs: arithmetic
+seeds: [42, 43, 44, 45, 46]
+policies:
+  - data_change

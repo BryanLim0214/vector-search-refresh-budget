@@ -1,0 +1,255 @@
+version: "1.0"
+title: "Addendum 3 Pre-Registration (Exploratory, Post Hoc): Charging data_change Score Messages to the Byte Budget on M3 (G = 8) and M1 (Q = 800)"
+status: "EXPLORATORY: WRITTEN AFTER M1, M2, AND M3 RESULTS WERE READ (NOT CONFIRMATORY)"
+
+scope_and_disclosure:
+  confirmatory: false
+  exploratory_post_hoc: true
+  written_after_reading_results_of:
+    - "main/M1 (330 runs)"
+    - "main/M2 (330 runs)"
+    - "main/sens (66 runs)"
+    - "main/M1_online (30 runs)"
+    - "main/M3 (360 runs)"
+  rationale: >
+    Deviation D-16 and three review rounds noted an accounting asymmetry. recovered_neighbor
+    pays 21,632 B per epoch at S = 32, m = 2 for its probing messages (cutoffs 16,384 B,
+    shard scores 128 B, sample replies 5,120 B), which leaves k = 1, 3, 7 summaries per epoch
+    at B = 2, 4, 8. data_change sends one 4-byte score per shard per epoch (128 B at S = 32),
+    which was not charged, so it kept k = B = 2, 4, 8. round_robin, ql and ss send no per-epoch
+    messages and keep k = B. Charging the 128 B gives data_change
+    floor((B * 24,576 - 128) / 24,576) = B - 1 = 1, 3, 7 summaries per epoch, the same k as
+    recovered_neighbor, and an arithmetic starvation cap A = ceil(2 * S / k) of 64, 22, 10
+    epochs instead of 32, 16, 8. recovered_neighbor's setup broadcast of sample vectors
+    (3,145,728 B in total) stays uncharged, as in M3 (D-16 item 2), which still favours
+    recovered_neighbor. This addendum was written after the M1, M2, sens, M1_online and M3
+    results were read, so every comparison here is exploratory and none has a pass/fail gate.
+
+frozen_constants:
+  embedding_dim_d: 384
+  float_bytes_b: 4
+  num_shards_S: 32
+  centroids_per_shard_c: 16
+  routed_shards_m: 2
+  top_k: 10
+  summary_bytes: 24576
+  dc_score_bytes_per_shard: 4
+  dc_score_bytes_per_epoch_at_S32: 128
+  extra_search_bytes: 1656
+  push_vector_bytes: 1544
+  rn_probe_overhead_bytes_per_epoch_at_S32_m2: 21632
+  inserts_per_epoch_I: 1000
+  num_epochs_T: 50
+  queries_per_epoch_Q: 200
+  recent_window_W: 2
+  active_segments_G: 8
+  seeds: [42, 43, 44, 45, 46]
+  bootstrap_resamples: 2000
+  confidence_level: 0.95
+
+run_matrix:
+  charged_m3_runs:
+    config: "configs/add3_M3_dc_charged.yaml"
+    experiment: "addendum3/M3_dc_charged"
+    placement_mode: "time_segment_g"
+    active_segments: 8
+    stream_modes: ["steady", "new_topic"]
+    budget_summaries_B: [2, 4, 8]
+    effective_summaries_refreshed_k: [1, 3, 7]
+    effective_starvation_cap_A: [64, 22, 10]
+    queries_per_epoch_Q: [200]
+    policies: ["data_change"]
+    charge_dc_scores_to_budget: true
+    seeds: [42, 43, 44, 45, 46]
+    total_runs: 30
+  replication_check_run:
+    config: "configs/add3_replication.yaml"
+    experiment: "addendum3/replication"
+    placement_mode: "time_segment_g"
+    active_segments: 8
+    stream_modes: ["new_topic"]
+    budget_summaries_B: [4]
+    queries_per_epoch_Q: [200]
+    policies: ["data_change"]
+    charge_dc_scores_to_budget: false
+    seeds: [42]
+    total_runs: 1
+  charged_m1_runs:
+    config: "configs/add3_M1_dc_charged.yaml"
+    experiment: "addendum3/M1_dc_charged"
+    placement_mode: "nearest_initial"
+    stream_modes: ["steady", "new_topic"]
+    budget_summaries_B: [4]
+    effective_summaries_refreshed_k: [3]
+    effective_starvation_cap_A: [22]
+    queries_per_epoch_Q: [800]
+    policies: ["data_change"]
+    charge_dc_scores_to_budget: true
+    seeds: [42, 43, 44, 45, 46]
+    total_runs: 10
+  m1_replication_check_run:
+    config: "configs/add3_M1_replication.yaml"
+    experiment: "addendum3/M1_replication"
+    placement_mode: "nearest_initial"
+    stream_modes: ["new_topic"]
+    budget_summaries_B: [4]
+    queries_per_epoch_Q: [800]
+    policies: ["data_change"]
+    charge_dc_scores_to_budget: false
+    seeds: [42]
+    total_runs: 1
+  reused_stored_runs:
+    experiments: ["main/M3", "main/M1", "main/M1_online"]
+    description: >
+      All other policies (recovered_neighbor, push_vectors, extra_search, extra_search_online,
+      and uncharged data_change) reuse the stored runs in results/main/M3,
+      repo/results/main/M1, and results/main/M1_online without re-running.
+  total_new_runs: 42
+
+metrics_and_intervals:
+  metrics_reported:
+    - "recent_recall_at_10 (primary metric: fraction of true top-10 neighbors inserted in last W = 2 epochs returned)"
+    - "overall_recall_at_10 (secondary metric: fraction of all true top-10 neighbors returned)"
+  uncertainty_intervals:
+    - "Two-stage paired hierarchical bootstrap 95% confidence interval (2,000 replicates, resampling seeds with replacement and queries within each seed slot independently with replacement)"
+    - "Five-seed Student's t 95% confidence interval across per-seed paired mean differences (df = 4)"
+
+exploratory_comparisons:
+  X1_equal_k_head_to_head:
+    id: "X1"
+    name: "Equal-k head-to-head: charged data_change vs recovered_neighbor"
+    experiment_charged: "addendum3/M3_dc_charged"
+    experiment_baseline: "main/M3"
+    comparison: "charged_dc - recovered_neighbor"
+    stream_modes: ["steady", "new_topic"]
+    budget_summaries_B: [2, 4, 8]
+    effective_k_both_policies: [1, 3, 7]
+    queries_per_epoch_Q: 200
+    description: >
+      Paired difference (charged_dc - recovered_neighbor) on recent recall@10 and overall
+      recall@10 at B in {2, 4, 8} on steady and new_topic. Both policies refresh exactly
+      k = B - 1 in {1, 3, 7} summaries per epoch under the same byte budget and share the
+      same arithmetic starvation cap A = ceil(64 / k) in {64, 22, 10}.
+
+  X2_charged_dc_vs_alternatives:
+    id: "X2"
+    name: "Charged data_change vs non-refresh alternatives (push_vectors and extra_search_online)"
+    experiment_charged: "addendum3/M3_dc_charged"
+    experiment_baseline: "main/M3"
+    comparisons:
+      - "charged_dc - push_vectors"
+      - "charged_dc - extra_search_online"
+    stream_modes: ["steady", "new_topic"]
+    budget_summaries_B: [2, 4, 8]
+    queries_per_epoch_Q: 200
+    description: >
+      Paired differences (charged_dc - push_vectors) and (charged_dc - extra_search_online)
+      on recent recall@10 and overall recall@10 at B in {2, 4, 8} on steady and new_topic.
+
+  X3_cost_of_charging:
+    id: "X3"
+    name: "Cost of charging: charged data_change vs uncharged data_change"
+    experiment_charged: "addendum3/M3_dc_charged"
+    experiment_baseline: "main/M3"
+    comparison: "charged_dc - uncharged_dc"
+    stream_modes: ["steady", "new_topic"]
+    budget_summaries_B: [2, 4, 8]
+    k_charged_vs_uncharged:
+      B2: "k = 1 vs k = 2"
+      B4: "k = 3 vs k = 4"
+      B8: "k = 7 vs k = 8"
+    queries_per_epoch_Q: 200
+    description: >
+      Paired difference (charged_dc - uncharged_dc) on recent recall@10 and overall
+      recall@10 at B in {2, 4, 8} on steady and new_topic, quantifying the recall cost of
+      sacrificing 1 summary refresh per epoch to pay 128 B of score messages under integer
+      summary packing.
+
+  X4_centroid_Q800:
+    id: "X4"
+    name: "Centroid placement at Q = 800: charged data_change vs extra search and vector push"
+    claim_tested: >
+      Paper results.tex and conclusion.tex: on new_topic at Q = 800, B = 4, data-change refresh
+      (scores uncharged) overtakes batch extra search (and online extra search) but trails
+      vector push.
+    experiment_charged: "addendum3/M1_dc_charged"
+    experiment_baseline: ["main/M1", "main/M1_online"]
+    placement_mode: "nearest_initial"
+    budget_summaries_B: 4
+    queries_per_epoch_Q: 800
+    stream_modes: ["steady", "new_topic"]
+    comparisons:
+      - "charged_dc - extra_search"
+      - "charged_dc - push_vectors"
+      - "charged_dc - extra_search_online"   # optional, from main/M1_online
+      - "charged_dc - uncharged_dc"          # cost of charging at Q = 800
+    description: >
+      Paired by seed and query against the stored runs, same metrics and intervals as X1 to X3.
+
+predictions:
+  note: >
+    These predictions are recorded before running Addendum 3 to structure the exploratory
+    interpretation. They are NOT confirmatory pass/fail gates; analysis output records
+    whether each prediction held descriptively without declaring PASS or FAIL.
+  P1:
+    id: "P1"
+    condition:
+      stream_mode: "new_topic"
+      budget_summaries_B: 4
+      comparison: "charged_dc - recovered_neighbor"
+      metric: "recent_recall_at_10"
+    statement: >
+      On new_topic at B = 4, charged_dc - recovered_neighbor has lower 95% bound > -0.01
+      (> -1.0 percentage point), i.e. data_change remains within noise of or ahead of
+      recovered_neighbor even when both refresh k = 3 summaries per epoch, using the two-stage
+      paired bootstrap interval, as in Addendum 2; the five-seed t-interval is reported next
+      to it, and any disagreement is stated.
+  P2:
+    id: "P2"
+    condition:
+      stream_mode: "new_topic"
+      budget_summaries_B: 2
+      comparison: "charged_dc - push_vectors"
+      metric: "recent_recall_at_10"
+    statement: >
+      On new_topic at B = 2, where charged_dc drops from k = 2 to k = 1 summary per epoch,
+      charged_dc - push_vectors no longer has its 95% interval strictly above zero
+      (lower 95% bound <= 0.0), using the two-stage paired bootstrap interval, as in
+      Addendum 2; the five-seed t-interval is reported next to it, and any disagreement is
+      stated.
+
+replication_check:
+  config: "configs/add3_replication.yaml"
+  target_stored_run:
+    experiment: "main/M3"
+    run_id: "data_change_S32_m2_B4_Q200_new_topic_time_segment_g_W2_kmeans_bursts0_setup0_starvation_cap_arith_seed42"
+    policy: "data_change"
+    stream_mode: "new_topic"
+    budget_summaries_B: 4
+    seed: 42
+    charge_dc_scores_to_budget: false
+  criterion: >
+    The replication run must equal the stored M3 data_change new_topic B = 4 seed 42 run
+    exactly: every per-query value in queries.npz (recall_at_10, recent_recall_at_10,
+    missed_neighbors), every non-CPU column of epochs.parquet (per-epoch recall, refresh
+    counts, forced-by-cap counts, byte totals by category), and every non-CPU value in
+    summary.json except the new key charge_dc_scores_to_budget. The simulator does not store
+    the ids of refreshed shards, so shard choices are checked only through these values.
+    If any value differs or the replication run is missing, analysis stops and reports it.
+  m1_replication:
+    config: "configs/add3_M1_replication.yaml"
+    target_stored_run:
+      experiment: "main/M1"
+      run_id: "data_change_S32_m2_B4_Q800_new_topic_nearest_initial_W2_kmeans_bursts0_setup0_starvation_cap_arith_seed42"
+      policy: "data_change"
+      stream_mode: "new_topic"
+      budget_summaries_B: 4
+      queries_per_epoch_Q: 800
+      seed: 42
+      charge_dc_scores_to_budget: false
+    criterion: >
+      The M1 replication run must equal the stored M1 data_change new_topic B = 4 Q = 800
+      seed 42 run in repo/results/main/M1 exactly under the same criterion above (every
+      per-query value in queries.npz, every non-CPU column of epochs.parquet, and every
+      non-CPU value in summary.json except charge_dc_scores_to_budget). If any value differs
+      or the M1 replication run is missing, analysis stops and reports it.

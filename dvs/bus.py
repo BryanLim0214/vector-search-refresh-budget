@@ -33,6 +33,7 @@ SHARD_SEARCH_BYTES: int = VECTOR_BYTES + RESULT_BYTES  # 1,656
 
 CUTOFFS_PER_SHARD_BYTES: int = SAMPLE_QUERIES_COUNT * (FLOAT_BYTES + FLOAT_BYTES)  # 512
 SHARD_SCORE_BYTES: int = FLOAT_BYTES  # 4
+DC_SCORE_BYTES_PER_SHARD: int = 4
 SAMPLE_REPLY_PER_SHARD_QUERY_BYTES: int = TOP_K * FLOAT_BYTES  # 40
 SETUP_SAMPLE_VECTORS_PER_SHARD_BYTES: int = SAMPLE_QUERIES_COUNT * VECTOR_BYTES  # 98,304
 
@@ -45,6 +46,7 @@ BUDGETED_CATEGORIES = frozenset({
     "extra_search_result",
     "push_vector",
     "setup_sample_vectors_amortized",
+    "data_change_score_messages",
 })
 
 WORKLOAD_CATEGORIES = frozenset({
@@ -273,6 +275,7 @@ class ByteBus:
             "extra_search_result": 0,
             "push_vector": 0,
             "setup_sample_vectors_amortized": 0,
+            "data_change_score_messages": 0,
             "query_out": 0,
             "query_result": 0,
         }

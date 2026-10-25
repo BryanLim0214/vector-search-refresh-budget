@@ -49,6 +49,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy.stats import t as student_t
 import yaml
 
 REFRESH_RULES = ["round_robin", "data_change", "recovered_neighbor", "ql", "ss"]
@@ -116,13 +117,15 @@ def make_canonical_run_id(
     starvation_cap_mode: str,
     fixed_cap_epochs: Optional[int],
     seed: int,
+    charge_dc_scores_to_budget: bool = False,
 ) -> str:
     cap_tag = "arith" if starvation_cap_mode == "arithmetic" else f"A{fixed_cap_epochs}"
+    dc_tag = "_dcscore1" if charge_dc_scores_to_budget else ""
     return (
         f"{policy}_S{num_shards}_m{m}_B{budget_summaries}_Q{queries_per_epoch}"
         f"_{stream_mode}_{placement_mode}_W{recent_window_w}_{sharding_mode}"
         f"_bursts{int(bursts)}_setup{int(charge_setup_to_budget)}"
-        f"_{aging_mode}_{cap_tag}_seed{seed}"
+        f"_{aging_mode}_{cap_tag}_seed{seed}{dc_tag}"
     )
 
 
@@ -151,6 +154,7 @@ def load_expected_grid(config_path: Path, exp_label: str) -> Dict[str, Any]:
     bursts = bool(cfg["bursts"])
     sharding_mode = str(cfg["sharding_mode"])
     charge_setup_to_budget = bool(cfg["charge_setup_to_budget"])
+    charge_dc_scores_to_budget = bool(cfg.get("charge_dc_scores_to_budget", False))
     aging_mode = str(cfg["aging_mode"])
 
     raw_cap = cfg["starvation_cap_epochs"]
@@ -194,6 +198,7 @@ def load_expected_grid(config_path: Path, exp_label: str) -> Dict[str, Any]:
                             starvation_cap_mode=starvation_cap_mode,
                             fixed_cap_epochs=fixed_cap_epochs,
                             seed=seed,
+                            charge_dc_scores_to_budget=charge_dc_scores_to_budget,
                         )
                         expected_cells[cell_key] = rid
                         run_id_to_cell[rid] = cell_key
@@ -217,6 +222,7 @@ def load_expected_grid(config_path: Path, exp_label: str) -> Dict[str, Any]:
         "bursts": bursts,
         "sharding_mode": sharding_mode,
         "charge_setup_to_budget": charge_setup_to_budget,
+        "charge_dc_scores_to_budget": charge_dc_scores_to_budget,
         "aging_mode": aging_mode,
         "starvation_cap_mode": starvation_cap_mode,
         "fixed_cap_epochs": fixed_cap_epochs,
@@ -239,7 +245,8 @@ def hierarchical_bootstrap_ci(
       2. Within each resampled (replicate, slot), draws an independent within-seed
          query resample of size N_s with replacement (fixing L-1).
       3. Computes the query-weighted mean across the resampled seeds.
-    Also computes the fixed-seed (within-seed query resampling only) CI for reference.
+    Also computes the fixed-seed (within-seed query resampling only) CI and
+    the K-seed Student's t-interval across per-seed means for reference.
     """
     cleaned: List[np.ndarray] = []
     for arr in per_seed_arrays:
@@ -254,6 +261,8 @@ def hierarchical_bootstrap_ci(
             "seed_mean": float("nan"),
             "ci_low": float("nan"),
             "ci_high": float("nan"),
+            "t_ci_low": float("nan"),
+            "t_ci_high": float("nan"),
             "within_seed_ci_low": float("nan"),
             "within_seed_ci_high": float("nan"),
             "n_queries": 0,
@@ -283,7 +292,7 @@ def hierarchical_bootstrap_ci(
     alpha = (1.0 - ci) / 2.0
     w_low, w_high = np.quantile(within_only_means, [alpha, 1.0 - alpha])
 
-    # Two-stage (across seeds + within seed) bootstrap
+    # Two-stage (across seeds + within seed) bootstrap and K-seed Student's t-interval
     if k_seeds > 1:
         seed_choices = rng.integers(0, k_seeds, size=(n_boot, k_seeds))
         rep_indices = np.arange(n_boot)[:, None]
@@ -292,15 +301,23 @@ def hierarchical_bootstrap_ci(
         chosen_counts = counts[seed_choices]  # (n_boot, k_seeds)
         hier_means = np.sum(chosen_sums, axis=1) / np.sum(chosen_counts, axis=1)
         ci_low, ci_high = np.quantile(hier_means, [alpha, 1.0 - alpha])
+
+        seed_sd = float(np.std(seed_means, ddof=1))
+        t_crit = float(student_t.ppf(1.0 - alpha, df=k_seeds - 1))
+        t_half = t_crit * seed_sd / float(np.sqrt(k_seeds))
+        t_ci_low, t_ci_high = float(seed_mean - t_half), float(seed_mean + t_half)
     else:
         # 1 seed: cannot estimate across-seed variation; do not silently substitute within-seed CI
         ci_low, ci_high = float("nan"), float("nan")
+        t_ci_low, t_ci_high = float("nan"), float("nan")
 
     return {
         "mean": pooled_mean,
         "seed_mean": seed_mean,
         "ci_low": float(ci_low),
         "ci_high": float(ci_high),
+        "t_ci_low": float(t_ci_low),
+        "t_ci_high": float(t_ci_high),
         "within_seed_ci_low": float(w_low),
         "within_seed_ci_high": float(w_high),
         "n_queries": int(len(all_concat)),
@@ -339,6 +356,8 @@ def paired_hierarchical_bootstrap_ci(
         "seed_mean_diff": res["seed_mean"],
         "ci_low": res["ci_low"],
         "ci_high": res["ci_high"],
+        "t_ci_low": res["t_ci_low"],
+        "t_ci_high": res["t_ci_high"],
         "within_seed_ci_low": res["within_seed_ci_low"],
         "within_seed_ci_high": res["within_seed_ci_high"],
         "n_paired_queries": res["n_queries"],
@@ -370,6 +389,11 @@ def _validate_run_against_grid(
         ("bursts", bool(summary["bursts"]), bool(grid_spec["bursts"])),
         ("sharding_mode", str(summary["sharding_mode"]), str(grid_spec["sharding_mode"])),
         ("charge_setup_to_budget", bool(summary["charge_setup_to_budget"]), bool(grid_spec["charge_setup_to_budget"])),
+        (
+            "charge_dc_scores_to_budget",
+            bool(summary.get("charge_dc_scores_to_budget", False)),
+            bool(grid_spec.get("charge_dc_scores_to_budget", False)),
+        ),
         ("aging_mode", str(summary["aging_mode"]), str(grid_spec["aging_mode"])),
         ("starvation_cap_mode", str(summary["starvation_cap_mode"]), str(grid_spec["starvation_cap_mode"])),
     ]
@@ -433,6 +457,7 @@ def _validate_run_against_grid(
             "starvation_cap_epochs",
             "seed",
             "charge_setup_to_budget",
+            "charge_dc_scores_to_budget",
         ):
             if k in prov_cfg and k in summary and prov_cfg[k] != summary[k]:
                 mismatches.append(f"provenance.config[{k!r}]={prov_cfg[k]!r} != summary[{k!r}]={summary[k]!r}")

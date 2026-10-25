@@ -42,6 +42,7 @@ import pytest
 from dvs.bus import (
     ByteBus,
     CUTOFFS_PER_SHARD_BYTES,
+    DC_SCORE_BYTES_PER_SHARD,
     DIM,
     PUSH_VECTOR_BYTES,
     RESULT_BYTES,
@@ -58,6 +59,7 @@ from dvs.coordinator import Coordinator
 from dvs.data import load_dataset, normalize_l2
 from dvs.metrics import compute_spearman_correlation
 from dvs.policies import (
+    ALL_POLICIES,
     PolicyController,
     REFERENCE_POLICIES,
     REFRESH_POLICIES,
@@ -1377,7 +1379,8 @@ def test_12_defaults_unchanged_vs_previous_code_version(tmp_path) -> None:
             # 3. Compare summary.json keys and all non-CPU values bit for bit
             s_old = json.loads((d_old / "summary.json").read_text(encoding="utf-8"))
             s_new = json.loads((d_new / "summary.json").read_text(encoding="utf-8"))
-            assert set(s_old.keys()) == set(s_new.keys())
+            assert set(s_old.keys()) | {"charge_dc_scores_to_budget"} == set(s_new.keys())
+            assert s_new["charge_dc_scores_to_budget"] is False
             for k in s_old:
                 if not k.startswith("cpu_"):
                     if isinstance(s_old[k], float) and np.isnan(s_old[k]):
@@ -1388,7 +1391,7 @@ def test_12_defaults_unchanged_vs_previous_code_version(tmp_path) -> None:
             # 4. Compare provenance.json config dict
             p_old = json.loads((d_old / "provenance.json").read_text(encoding="utf-8"))
             p_new = json.loads((d_new / "provenance.json").read_text(encoding="utf-8"))
-            assert p_old["config"] == p_new["config"]
+            assert {**p_old["config"], "charge_dc_scores_to_budget": False} == p_new["config"]
             assert p_old["config_sha256"] == p_new["config_sha256"]
             assert p_old["data_provenance_sha256"] == p_new["data_provenance_sha256"]
 
@@ -1445,4 +1448,276 @@ def test_12_defaults_unchanged_vs_previous_code_version(tmp_path) -> None:
         use_gt_cache=True,
     )
     _assert_exp_dirs_equal(out_old_w2 / "compare_defaults_w2", out_new_w2 / "compare_defaults_w2", 4)
+
+
+def test_13_charge_dc_scores_to_budget(tmp_path: Path) -> None:
+    """Test charge_dc_scores_to_budget flag across policies, budgets, bus logging, and run_from_config."""
+    assert DC_SCORE_BYTES_PER_SHARD == 4
+
+    # 1. PolicyController unit checks at S = 32 across B = 2, 4, 8
+    expected_uncharged_k = {2: 2, 4: 4, 8: 8}
+    expected_uncharged_cap = {2: 32, 4: 16, 8: 8}
+    expected_charged_k = {2: 1, 4: 3, 8: 7}
+    expected_charged_cap = {2: 64, 4: 22, 8: 10}
+
+    for b_sum in (2, 4, 8):
+        budget_bytes = b_sum * SUMMARY_BYTES
+
+        # Default False for data_change
+        ctrl_false = PolicyController(
+            policy="data_change",
+            num_shards=32,
+            m=2,
+            budget_bytes=budget_bytes,
+            num_epochs=50,
+            starvation_cap_epochs=None,
+            charge_dc_scores_to_budget=False,
+        )
+        assert ctrl_false.summaries_per_epoch() == expected_uncharged_k[b_sum]
+        assert ctrl_false.effective_starvation_cap() == expected_uncharged_cap[b_sum]
+
+        # True for data_change: k = B - 1 = 1, 3, 7 and A = ceil(64 / k) = 64, 22, 10
+        ctrl_true = PolicyController(
+            policy="data_change",
+            num_shards=32,
+            m=2,
+            budget_bytes=budget_bytes,
+            num_epochs=50,
+            starvation_cap_epochs=None,
+            charge_dc_scores_to_budget=True,
+        )
+        assert ctrl_true.summaries_per_epoch() == expected_charged_k[b_sum]
+        assert ctrl_true.effective_starvation_cap() == expected_charged_cap[b_sum]
+
+        # True for all other policies: no effect on summaries_per_epoch() or effective_starvation_cap()
+        for other_pol in sorted(set(ALL_POLICIES) - {"data_change"}):
+            c_other_false = PolicyController(
+                policy=other_pol,
+                num_shards=32,
+                m=2,
+                budget_bytes=budget_bytes,
+                num_epochs=50,
+                starvation_cap_epochs=None,
+                charge_dc_scores_to_budget=False,
+            )
+            c_other_true = PolicyController(
+                policy=other_pol,
+                num_shards=32,
+                m=2,
+                budget_bytes=budget_bytes,
+                num_epochs=50,
+                starvation_cap_epochs=None,
+                charge_dc_scores_to_budget=True,
+            )
+            assert c_other_true.summaries_per_epoch() == c_other_false.summaries_per_epoch()
+            assert c_other_true.effective_starvation_cap() == c_other_false.effective_starvation_cap()
+
+    # 2. Simulation & bus message checks at S = 32, B = 2
+    rng = np.random.default_rng(123)
+    init_vecs = normalize_l2(rng.standard_normal((640, DIM)).astype(np.float32))
+    init_ids = np.arange(640, dtype=np.int64)
+    stream_vecs = normalize_l2(rng.standard_normal((200, DIM)).astype(np.float32))
+    stream_ids = np.arange(1000, 1200, dtype=np.int64)
+    test_queries = normalize_l2(rng.standard_normal((20, DIM)).astype(np.float32))
+    test_qids = np.arange(5000, 5020, dtype=np.int64)
+    sample_queries = normalize_l2(rng.standard_normal((32, DIM)).astype(np.float32))
+    sample_qids = np.arange(6000, 6032, dtype=np.int64)
+
+    orig_step = PolicyController.step_epoch
+    decisions_false = []
+    with patch.object(
+        PolicyController,
+        "step_epoch",
+        autospec=True,
+        side_effect=lambda self, *a, **kw: (
+            decisions_false.append(orig_step(self, *a, **kw)) or decisions_false[-1]
+        ),
+    ):
+        res_dc_false = run_single_simulation(
+            policy="data_change",
+            initial_vectors=init_vecs,
+            initial_ids=init_ids,
+            stream_vectors=stream_vecs,
+            stream_ids=stream_ids,
+            test_queries=test_queries,
+            test_query_ids=test_qids,
+            sample_queries=sample_queries,
+            sample_query_ids=sample_qids,
+            num_shards=32,
+            c=16,
+            m=2,
+            budget_summaries=2,
+            num_epochs=2,
+            inserts_per_epoch=64,
+            queries_per_epoch=10,
+            seed=42,
+            charge_dc_scores_to_budget=False,
+        )
+    assert [d.overhead_bytes for d in decisions_false] == [0, 0]
+    assert [d.effective_starvation_cap for d in decisions_false] == [32, 32]
+    assert res_dc_false.summary["starvation_cap_epochs"] == 32
+    assert list(res_dc_false.epochs_df["num_summaries_refreshed"]) == [2, 2]
+    for ep in range(2):
+        assert res_dc_false.bus.epoch_category_totals(ep)["data_change_score_messages"] == 0
+        assert res_dc_false.bus.epoch_budget_bytes(ep) == 2 * SUMMARY_BYTES
+
+    decisions_true = []
+    with patch.object(
+        PolicyController,
+        "step_epoch",
+        autospec=True,
+        side_effect=lambda self, *a, **kw: (
+            decisions_true.append(orig_step(self, *a, **kw)) or decisions_true[-1]
+        ),
+    ):
+        res_dc_true = run_single_simulation(
+            policy="data_change",
+            initial_vectors=init_vecs,
+            initial_ids=init_ids,
+            stream_vectors=stream_vecs,
+            stream_ids=stream_ids,
+            test_queries=test_queries,
+            test_query_ids=test_qids,
+            sample_queries=sample_queries,
+            sample_query_ids=sample_qids,
+            num_shards=32,
+            c=16,
+            m=2,
+            budget_summaries=2,
+            num_epochs=2,
+            inserts_per_epoch=64,
+            queries_per_epoch=10,
+            seed=42,
+            charge_dc_scores_to_budget=True,
+        )
+    assert [d.overhead_bytes for d in decisions_true] == [128, 128]
+    assert [d.effective_starvation_cap for d in decisions_true] == [64, 64]
+    assert res_dc_true.summary["starvation_cap_epochs"] == 64
+    assert list(res_dc_true.epochs_df["num_summaries_refreshed"]) == [1, 1]
+    for ep in range(2):
+        assert res_dc_true.bus.epoch_category_totals(ep)["data_change_score_messages"] == 128
+        assert res_dc_true.bus.epoch_budget_bytes(ep) == 1 * SUMMARY_BYTES + 128
+        dc_msgs = [
+            m
+            for m in res_dc_true.bus.messages
+            if m.epoch == ep and m.category == "data_change_score_messages"
+        ]
+        assert len(dc_msgs) == 1
+        assert dc_msgs[0].bytes == 128
+        assert dc_msgs[0].src == "shards"
+        assert dc_msgs[0].dst == "coordinator"
+        assert dc_msgs[0].charged_to_budget is True
+
+    # Other policies with charge_dc_scores_to_budget=True are identical to False
+    for other_pol in sorted(set(ALL_POLICIES) - {"data_change"}):
+        r_f = run_single_simulation(
+            policy=other_pol,
+            initial_vectors=init_vecs,
+            initial_ids=init_ids,
+            stream_vectors=stream_vecs,
+            stream_ids=stream_ids,
+            test_queries=test_queries,
+            test_query_ids=test_qids,
+            sample_queries=sample_queries,
+            sample_query_ids=sample_qids,
+            num_shards=32,
+            c=16,
+            m=2,
+            budget_summaries=2,
+            num_epochs=2,
+            inserts_per_epoch=64,
+            queries_per_epoch=10,
+            seed=42,
+            charge_dc_scores_to_budget=False,
+        )
+        r_t = run_single_simulation(
+            policy=other_pol,
+            initial_vectors=init_vecs,
+            initial_ids=init_ids,
+            stream_vectors=stream_vecs,
+            stream_ids=stream_ids,
+            test_queries=test_queries,
+            test_query_ids=test_qids,
+            sample_queries=sample_queries,
+            sample_query_ids=sample_qids,
+            num_shards=32,
+            c=16,
+            m=2,
+            budget_summaries=2,
+            num_epochs=2,
+            inserts_per_epoch=64,
+            queries_per_epoch=10,
+            seed=42,
+            charge_dc_scores_to_budget=True,
+        )
+        for ep in range(2):
+            assert r_t.bus.epoch_category_totals(ep)["data_change_score_messages"] == 0
+            assert r_t.bus.epoch_budget_bytes(ep) == r_f.bus.epoch_budget_bytes(ep)
+        assert np.array_equal(r_t.all_query_recall, r_f.all_query_recall)
+
+    # 3. Verify run_id suffix via run_from_config (only added when charge_dc_scores_to_budget is True)
+    cfg_false_path = tmp_path / "dc_false.yaml"
+    cfg_false_path.write_text(
+        "\n".join(
+            [
+                "experiment: test_dc_false",
+                "initial_vectors_limit: 400",
+                "stream_vectors_limit: 200",
+                "num_shards: 8",
+                "c: 4",
+                "m: 2",
+                "budget_summaries: 2",
+                "num_epochs: 2",
+                "inserts_per_epoch: 50",
+                "queries_per_epoch: 10",
+                "stream_modes: [steady]",
+                "placement_mode: nearest_initial",
+                "charge_dc_scores_to_budget: false",
+                "seeds: [42]",
+                "policies: [data_change]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    res_list_f = run_from_config(
+        config_path=cfg_false_path,
+        repo_root=REPO_ROOT,
+        data_dir=DATA_DIR,
+        results_root=tmp_path / "res_f",
+    )
+    assert len(res_list_f) == 1
+    assert not res_list_f[0].run_id.endswith("_dcscore1")
+
+    cfg_true_path = tmp_path / "dc_true.yaml"
+    cfg_true_path.write_text(
+        "\n".join(
+            [
+                "experiment: test_dc_true",
+                "initial_vectors_limit: 400",
+                "stream_vectors_limit: 200",
+                "num_shards: 8",
+                "c: 4",
+                "m: 2",
+                "budget_summaries: 2",
+                "num_epochs: 2",
+                "inserts_per_epoch: 50",
+                "queries_per_epoch: 10",
+                "stream_modes: [steady]",
+                "placement_mode: nearest_initial",
+                "charge_dc_scores_to_budget: true",
+                "seeds: [42]",
+                "policies: [data_change]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    res_list_t = run_from_config(
+        config_path=cfg_true_path,
+        repo_root=REPO_ROOT,
+        data_dir=DATA_DIR,
+        results_root=tmp_path / "res_t",
+    )
+    assert len(res_list_t) == 1
+    assert res_list_t[0].run_id.endswith("_dcscore1")
+
 

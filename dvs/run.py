@@ -404,6 +404,7 @@ def run_single_simulation(
     seed: int = 42,
     exact_local_search: bool = False,
     charge_setup_to_budget: bool = False,
+    charge_dc_scores_to_budget: bool = False,
     aging_mode: str = "starvation_cap",
     starvation_cap_epochs: Optional[int] = None,
     m_hnsw: int = 16,
@@ -511,6 +512,7 @@ def run_single_simulation(
         m=m_routed,
         num_epochs=num_epochs,
         charge_setup_to_budget=charge_setup_to_budget,
+        charge_dc_scores_to_budget=charge_dc_scores_to_budget,
         aging_mode=aging_mode,
         starvation_cap_epochs=starvation_cap_epochs,
     )
@@ -789,6 +791,7 @@ def run_single_simulation(
         "recent_window_w": recent_window_w,
         "exact_local_search": exact_local_search,
         "charge_setup_to_budget": charge_setup_to_budget,
+        "charge_dc_scores_to_budget": charge_dc_scores_to_budget,
         "initial_set_size": int(len(initial_vectors)),
         "stream_set_size": int(len(stream_vectors)),
         "queries_with_most_neighbors_in_stream": (
@@ -873,6 +876,7 @@ def run_single_simulation(
         "seed": seed,
         "exact_local_search": exact_local_search,
         "charge_setup_to_budget": charge_setup_to_budget,
+        "charge_dc_scores_to_budget": charge_dc_scores_to_budget,
     }
     if active_segments is not None or placement_mode == "time_segment_g":
         summary["active_segments"] = int(eff_active_segments)
@@ -1076,6 +1080,7 @@ def _worker_run_sim_task(task: Dict[str, Any]) -> Dict[str, Any]:
             seed=int(task["seed"]),
             exact_local_search=bool(task["exact_local_search"]),
             charge_setup_to_budget=bool(task["charge_setup_to_budget"]),
+            charge_dc_scores_to_budget=bool(task.get("charge_dc_scores_to_budget", False)),
             aging_mode=str(task["aging_mode"]),
             starvation_cap_epochs=task["starvation_cap_epochs"],
             run_id=run_id,
@@ -1233,6 +1238,9 @@ def run_from_config(
                     "charge_setup_to_budget": bool(
                         cond.get("charge_setup_to_budget", cfg.get("charge_setup_to_budget", False))
                     ),
+                    "charge_dc_scores_to_budget": bool(
+                        cond.get("charge_dc_scores_to_budget", cfg.get("charge_dc_scores_to_budget", False))
+                    ),
                     "aging_mode": str(cond.get("aging_mode", cfg.get("aging_mode", "starvation_cap"))),
                     "starvation_cap_epochs": parsed_cap,
                 }
@@ -1243,6 +1251,7 @@ def run_from_config(
         sharding_list = [str(x) for x in _as_list(cfg.get("sharding_mode", "kmeans"))]
         placement_list = [str(x) for x in _as_list(cfg.get("placement_mode", "nearest_initial"))]
         charge_setup_list = [bool(x) for x in _as_list(cfg.get("charge_setup_to_budget", False))]
+        charge_dc_scores_list = [bool(x) for x in _as_list(cfg.get("charge_dc_scores_to_budget", False))]
         aging_list = [str(x) for x in _as_list(cfg.get("aging_mode", "starvation_cap"))]
         condition_specs = [
             {
@@ -1252,6 +1261,7 @@ def run_from_config(
                 "placement_mode": pl_val,
                 "active_segments": default_active_segments,
                 "charge_setup_to_budget": cs_val,
+                "charge_dc_scores_to_budget": cdc_val,
                 "aging_mode": ag_val,
                 "starvation_cap_epochs": default_cap_epochs,
             }
@@ -1260,6 +1270,7 @@ def run_from_config(
             for sh_val in sharding_list
             for pl_val in placement_list
             for cs_val in charge_setup_list
+            for cdc_val in charge_dc_scores_list
             for ag_val in aging_list
         ]
 
@@ -1277,6 +1288,7 @@ def run_from_config(
         placement_mode = cond["placement_mode"]
         active_segments = cond["active_segments"]
         charge_setup_to_budget = cond["charge_setup_to_budget"]
+        charge_dc_scores_to_budget = cond["charge_dc_scores_to_budget"]
         aging_mode = cond["aging_mode"]
         starvation_cap_epochs = cond["starvation_cap_epochs"]
         cap_tag = "arith" if starvation_cap_epochs is None else f"A{starvation_cap_epochs}"
@@ -1327,11 +1339,12 @@ def run_from_config(
                                         and not bool(cfg.get("run_all_policies_when_setup_charged", False))
                                     ):
                                         continue
+                                    dc_score_suffix = "_dcscore1" if charge_dc_scores_to_budget else ""
                                     run_id = (
                                         f"{pol}_S{s_count}_m{m_val}_B{b_sum}_Q{q_val}"
                                         f"_{stream_mode}_{placement_mode}_W{recent_window_w}_{sharding_mode}"
                                         f"_bursts{int(bursts)}_setup{int(charge_setup_to_budget)}"
-                                        f"_{aging_mode}_{cap_tag}_seed{seed}"
+                                        f"_{aging_mode}_{cap_tag}_seed{seed}{dc_score_suffix}"
                                     )
                                     run_dir = exp_out_dir / run_id
                                     sim_tasks.append(
@@ -1355,6 +1368,7 @@ def run_from_config(
                                             "seed": int(seed),
                                             "exact_local_search": exact_local_search,
                                             "charge_setup_to_budget": charge_setup_to_budget,
+                                            "charge_dc_scores_to_budget": charge_dc_scores_to_budget,
                                             "aging_mode": aging_mode,
                                             "starvation_cap_epochs": starvation_cap_epochs,
                                             "gt_cache_path": (
@@ -1442,6 +1456,7 @@ def run_from_config(
                 r.config["sharding_mode"],
                 r.config["bursts"],
                 r.config["charge_setup_to_budget"],
+                r.config["charge_dc_scores_to_budget"],
                 r.config["recent_window_w"],
                 r.config["aging_mode"],
                 r.config["starvation_cap_mode"],
@@ -1494,9 +1509,10 @@ def run_from_config(
                             "sharding_mode": key[6],
                             "bursts": key[7],
                             "charge_setup_to_budget": key[8],
-                            "recent_window_w": key[9],
-                            "aging_mode": key[10],
-                            "starvation_cap_mode": key[11],
+                            "charge_dc_scores_to_budget": key[9],
+                            "recent_window_w": key[10],
+                            "aging_mode": key[11],
+                            "starvation_cap_mode": key[12],
                             "baseline_policy": op,
                             "recent_recall_diff_mean": ci_rec["mean_diff"],
                             "recent_recall_ci95_low": ci_rec["ci_low"],

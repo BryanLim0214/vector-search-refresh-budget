@@ -1,0 +1,22 @@
+experiment: addendum3/M1_replication
+description: "Addendum 3 single-run replication check: M1 data_change with charge_dc_scores_to_budget: false at B=4, Q=800, new_topic, seed=42"
+num_shards: [32]
+c: 16
+m: [2]
+budget_summaries: [4]
+num_epochs: 50
+inserts_per_epoch: 1000
+queries_per_epoch: [800]
+recent_window_w: 2
+stream_modes:
+  - new_topic
+placement_mode: nearest_initial
+bursts: false
+sharding_mode: kmeans
+charge_setup_to_budget: false
+charge_dc_scores_to_budget: false
+aging_mode: starvation_cap
+starvation_cap_epochs: arithmetic
+seeds: [42]
+policies:
+  - data_change
