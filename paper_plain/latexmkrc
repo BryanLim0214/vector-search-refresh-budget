@@ -1,0 +1,2 @@
+# Force a full build on every run so the PDF is never older than its sources.
+$go_mode = 1;

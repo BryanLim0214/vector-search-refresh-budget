@@ -1,0 +1,149 @@
+\section{How the System Works}
+\label{sec:system}
+
+\subsection{Data, Shards, and Summaries}
+
+% CITE-PLAIN: paper/sections/setup.tex:36 (nguyen2016msmarco), first part.
+We use \RNumCorpusTotalPassages{} passages and \RNumPlainTestQueries{} test queries from the MS MARCO data set \cite{nguyen2016msmarco}.
+% CITE-PLAIN: paper/sections/setup.tex:36 (nguyen2016msmarco), second part; "real" and "Bing" dropped.
+Its questions come from anonymized user queries, and its passages come from web documents \cite{nguyen2016msmarco}.
+% CITE-PLAIN: paper/sections/setup.tex:36 (reimers2019sbert); "six-layer" dropped.
+A language model called MiniLM, from the Sentence-Transformers software package \cite{reimers2019sbert}, turns each passage and query into a vector of \RNumVectorDimFloats{} numbers, or \RNumPlainVectorBytes{} bytes.
+We compare two vectors by multiplying their matching numbers and adding the products; a higher score means closer meaning.
+
+The $k$-means method sorts vectors into $k$ groups of similar vectors and finds the center, or average point, of each group.
+% CITE-PLAIN: paper/sections/system.tex:4 (douze2024faiss); Faiss glossed from the LEDGER quote.
+At setup, $k$-means from Faiss, a software package for searching and grouping vectors \cite{douze2024faiss}, splits the starting passages into the \RNumNumShards{} shards.
+We call the center of a shard's group its starting center.
+Each shard then runs $k$-means with \RNumCentersPerSummary{} groups on its own passages, and its summary is the list of their centers, \RNumSummaryBytes{} bytes.
+
+To answer a query, the coordinator scores each shard by the summary center closest to the query, and it searches the two best-scoring shards.
+% CITE-PLAIN: paper/sections/system.tex:4 (malkov2020hnsw); "proximity graph" glossed, the method name dropped.
+Each shard stores its vectors in a search graph that links each vector to nearby ones \cite{malkov2020hnsw}.
+A search hops along these links toward the query, and it can miss a few close passages.
+Each searched shard returns the IDs and scores of the \RNumPlainTopK{} closest passages it finds, and the coordinator keeps the best \RNumPlainTopK{}.
+New passages join a shard without moving old ones, and the coordinator keeps the shard's old summary until the shard sends a fresh one.
+
+Each time step draws its queries without repeats from the \RNumPlainTestQueries{} test queries, \RNumPlainQueriesDefault{} by default.
+Under starting-center placement, described below, we also test \RNumPlainQueriesLow{} and \RNumPlainQueriesHigh{} queries per time step.
+
+We test two streams, that is, two orders in which new passages arrive.
+In the mixed-topic stream, half the passages build the shards, and the other half arrive in random order, \RNumSteadyEpochInsertVecs{} per time step.
+In the new-topic stream, we first sort all passages into \RNumPlainTopicClusters{} clusters of similar passages with $k$-means, so each cluster is roughly one topic.
+Half of the clusters, picked at random, build the shards.
+The other half arrive one cluster after another, about \RNumPlainNewTopicStepVecs{} passages per time step on average, bringing topics the shards have not seen.
+% CITE-PLAIN: paper/sections/setup.tex:36 (simhadri2024bigann); "into 64 clusters" dropped.
+This design is modeled on the streaming test of the Big-ANN NeurIPS'23 vector-search competition, which inserts points cluster by cluster \cite{simhadri2024bigann}.
+
+Passages never move once stored, and we test three ways to place new ones.
+In starting-center placement, each new passage goes to the shard with the closest starting center.
+In one-shard placement, all of a time step's new passages go to one shard, and the next time step uses the next shard.
+Every refresh rule then refreshes that shard, because rules serve shards with new passages first (Section~\ref{sec:rules}).
+In eight-shard placement, a group of eight shards is open in each time step, and the group moves on by eight shards every step.
+Each new passage goes to the open shard with the closest starting center, so each step changes five to eight shards.
+In these last two placements, the coordinator picks shards only by their summaries and does not know which shards are open.
+
+\begin{table}[!t]
+\centering
+\caption{What Each Option Sends and What a Budget of 4 Buys per Time Step}
+\label{tab:options}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}l>{\raggedright\arraybackslash}p{4.2cm}r>{\raggedright\arraybackslash}p{1.55cm}@{}}
+\toprule
+Item & What is sent & Bytes & Budget of 4 buys \\
+\midrule
+Refresh & One shard's summary (\RNumCentersPerSummary{} centers) & \RNumSummaryBytes{} & \RNumFourRulesSummariesBFour{} summaries \\
+Extra search & A query to one more shard, and IDs and scores of its \RNumPlainTopK{} best matches & \RNumPlainSearchBytes{} & Up to \RNumExtraSearchesBFour{} searches \\
+Push & A new passage and its ID number & \RNumPlainPushBytes{} & Up to \RNumPushedVecsBFourPerEpoch{} passages \\
+\midrule
+Probe & Its scores, cutoffs, and counts in one time step (Section~\ref{sec:rules}) & \RNumRNOverheadEpochBytes{} & Room for \RNumRNSummariesBFour{} summaries \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{The Budget and Its Three Uses}
+
+The budget counts the network bytes each time step may use, in units of one summary.
+We test budgets of two, four, and eight summaries; four is the default and allows \RNumBudgetBFourEpochBytes{} bytes (Table~\ref{tab:options}).
+To refresh, a shard rebuilds its summary over all its passages and sends it.
+Refreshing all \RNumNumShards{} shards every time step would cost \RNumAlwaysFreshEpochBytes{} bytes, eight times the default budget.
+
+Extra search spends the budget on the queries where the coordinator is least sure.
+These are the queries whose second- and third-ranked shards have the closest scores, so either could hold the best matches.
+For such a query, the coordinator also searches the third-ranked shard.
+The planned version picks these queries after seeing all of the time step's queries, which a system answering each query on arrival could not do.
+A budget of four buys up to \RNumExtraSearchesBFour{} extra searches, so at \RNumPlainQueriesLow{} queries per step it also asks a fourth shard for some queries.
+The live version decides as each query arrives and asks at most one extra shard per query.
+It asks when the score gap is below a cutoff: the gap that would have spent the budget exactly in the previous time step.
+With push, shards send up to the budget's worth of their newest passages each time step.
+The coordinator keeps them all and checks each query against them.
+
+We also compare against two reference methods that ignore the budget.
+Never refresh keeps the first summaries, and refresh all sends all \RNumNumShards{} fresh summaries every time step.
+Refresh all is a reference, not the best that refresh can do.
+Its rebuilt summaries still have only \RNumCentersPerSummary{} centers, so they describe a shard roughly.
+Searching all \RNumNumShards{} shards finds more than \RNumPlainAllShardsMinPct{} of recent matches, so almost all misses come from choosing shards.
+
+\subsection{Five Refresh Rules}
+\label{sec:rules}
+
+A refresh rule picks which shards refresh in each time step.
+Every rule serves first the shards with new passages since their last refresh, putting any that waited too long ahead.
+The waiting limit is twice the time a rule needs to refresh every shard once.
+That is \RNumPlainCapBFour{} time steps for a rule that refreshes four summaries per step.
+Any budget left over re-sends the summaries of unchanged shards.
+Rules that score shards break ties by the lowest shard number.
+
+Rotation lets shards take turns.
+Most-searched favors the shards that past test queries were sent to most often, and largest-shard favors the shards with the most passages.
+Their scores do not reset after a refresh, so they keep picking the same shards until the waiting limit steps in.
+Most-changed scores a shard by the share of its passages that are new.
+It multiplies that share by how far the new passages lie, on average, from the nearest center in the shard's last summary.
+Each shard computes this score itself, so a real system would send one \RNumScoreBytesPerShard{}-byte score per shard, or \RNumDCScoreEpochBytes{} bytes per time step.
+Our main runs did not charge these bytes; the follow-up in Section~\ref{sec:follow} does.
+
+The sample-query probe is our own rule and the most complex.
+% CITE-PLAIN: paper/sections/system.tex:61 (pandey2008crawlorder, olston2002besteffort); the two ideas glossed as in Section II.
+It adapts two ideas from Section~\ref{sec:related}: ranking by how often items reach top results \cite{pandey2008crawlorder}, and letting each source rank its own changes \cite{olston2002besteffort}.
+The probe uses \RNumSampleQueries{} sample queries: practice questions from a separate part of the data set, not the test queries.
+The coordinator sends them to every shard once at setup.
+Each time step then has three rounds of messages.
+First, for each sample query, the coordinator asks the two shards that its summaries rank highest for the scores of their \RNumPlainTopK{} best matches.
+Second, it sends every shard two cutoffs for each sample query.
+One is the summary score a shard would need to rank in the top two.
+The other is the score of the query's \RNumPlainTopK{}th-best match so far.
+Third, each shard with new passages rebuilds its summary locally.
+For each sample query, it checks whether the rebuilt summary would lift it into the top two.
+For those queries, it counts its new passages that score above the \RNumPlainTopK{}th-best cutoff and sends that count.
+Among shards with new passages, those over the waiting limit refresh first.
+The rest go in order of their counts, with ties going to the lowest shard number.
+
+These rounds cost \RNumRNOverheadEpochBytes{} bytes per time step.
+Each budget is a whole number of summaries, and refresh can send only whole summaries.
+So any extra charged cost, however small, uses up the room for one summary.
+At a budget of four, the probe therefore refreshes three summaries where the other rules refresh four, and its waiting limit is \RNumPlainCapRNBFour{} time steps.
+
+\subsection{Costs We Do Not Count}
+
+The budget pays only for the messages in Table~\ref{tab:options}, and six other costs are left out.
+The first is sending new passages to the shards, which is the same for every method.
+The second is the probe's setup broadcast of \RNumRNSetupBroadcastBytes{} bytes, its small per-step lists of which sample queries to answer, and its shard work.
+Every changed shard rebuilds a summary just to compute its count, and the shards run \RNumRNSampleSearchesPerEpoch{} sample-query searches per time step.
+Spread over a run, the broadcast would add \RNumRNSetupAmortEpochBytes{} bytes per step.
+That is more than a budget of two, and at four it would leave no room for any summary.
+The third is most-changed's score bytes, in the main runs.
+The fourth is a free flag that tells the coordinator which shards have new passages.
+The flag says only that a shard has new passages, not what they are about.
+Every refresh rule uses it to choose shards to refresh, but queries are still sent by summaries alone.
+Largest-shard also gets the shard sizes for free.
+Charging even a few bytes for this flag would cost every refresh rule one whole summary per time step.
+The fifth is the added work of extra search: at the default query rate, shards run \RNumESLoadPctBTwo{} to \RNumESLoadPctBEight{} more searches across budgets.
+At a budget of four and \RNumPlainQueriesLow{} queries per step, they run up to \RNumESLoadPctQFifty{} more.
+Asking a third shard also means contacting three shards at once or waiting for a second exchange of messages, and neither is counted.
+The sixth is push's memory and scanning, up to \RNumPVMaxVecsBFour{} kept passages at a budget of four and \RNumPVMaxVecsBEight{} at eight.
+Scanning them for each query takes \RNumPlainPVScanRatioBFour{} to \RNumPlainPVScanRatioBEight{} times as many vector comparisons as scoring all summaries.
+Keeping only the last two time steps' \RNumPVFifoVecsBFour{} would give the same recent recall at a budget of four.
+Push also assumes the shards know which passages arrived last overall, since it sends the newest ones.
+Leaving out the probe's extra costs, most-changed's score bytes, and the free flag favors the refresh rules.
+Leaving out the extra search work and push's memory and scanning favors extra search and push.

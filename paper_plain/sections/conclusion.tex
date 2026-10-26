@@ -1,0 +1,23 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+When shard summaries go out of date, a split vector database can miss new matches.
+The best use of a fixed network budget for finding them depends on where new data goes and its topics.
+
+In our tested setting, the results suggest three rules of thumb.
+First, when new data joins the most similar shard, spend the budget on extra search if shards have spare capacity.
+Push is the other choice, if the coordinator can store and scan new passages.
+Extra search won at every query rate on mixed topics and up to \RNumPlainQueriesDefault{} queries per step on new topics.
+At \RNumPlainQueriesHigh{} queries on new topics, most-changed overtook it, but only fragilely once it paid for its scores.
+Push won at every rate we tried, but at the default rate extra search raised overall recall far more.
+Second, when each step's new data lands on one shard, refresh that shard if the data brings a new topic.
+When topics are mixed, push instead, since fresh summaries there also lower overall recall.
+When eight shards share the new data, push on mixed topics.
+On a new topic, neither refresh nor push wins reliably at the smaller budgets, and push wins at the largest.
+Third, to choose which shards to refresh, rank them by how much their data changed rather than by probing.
+Our evidence comes from eight shards on new topics at budgets of four and eight, even with scores paid.
+It also rests on recall alone, since we did not score most-changed with our ranking measure.
+
+These results come from one simulator and one data set, with some costs uncharged.
+Future work should test summaries that adapt to new data and coordinators that know where new data goes.
+It should also test higher arrival rates and slow responses.

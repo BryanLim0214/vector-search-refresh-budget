@@ -72,9 +72,9 @@ This slide covers the classical-baseline part of the rubric.
 
 The data are one hundred thousand passages from MS MARCO, a public set of web passages and real search questions. A small language model turns each passage into a list of three hundred eighty-four numbers that capture its meaning. We use a thousand test questions, and keep sixty-four other questions apart for the probe.
 
-The animation shows the three placements we test, meaning where a new passage is stored: on the shard with the closest topic, all on one shard per time step, or spread over eight shards per time step. New passages come either in mixed topic order or from new topics that were held back at the start.
+The animation shows the three placements we test, meaning where a new passage is stored: on the shard whose starting center is closest, all on one shard per time step, or on whichever of eight active shards has the closest topic, so some of the eight get more than others. New passages come either in mixed topic order or from new topics that were held back at the start.
 
-Our main score is recent recall. Take a question’s ten true best matches, keep the ones that arrived in the last two steps, and ask what share the system found. Overall recall is the same, counting all ten. Every setting is repeated five times with different random starts, called seeds. We resample the questions and seeds many times, and we call a difference clear only when its ninety-five percent range stays on one side of zero. And we wrote the plan and the tests down before the main analysis, so we could not pick the tests after seeing the results.
+Our main score is recent recall. Take a question’s ten true best matches, keep the ones that arrived in the last two steps, and ask what share the system found. Overall recall is the same, counting all ten. Every setting is repeated five times with different random starts, called seeds. We resample the questions and seeds many times, and we call a difference clear only when its ninety-five percent range stays on one side of zero. We wrote the plan and the tests down before the main analysis, and the one follow-up we added after seeing results is labeled as exploratory.
 
 This slide covers the metrics, data and workload parts of the rubric.
 
@@ -84,13 +84,13 @@ This slide covers the metrics, data and workload parts of the rubric.
 
 Here is the main finding in one sentence: where new data lands decides how to spend the network budget.
 
-When new passages go to the shard with the closest topic, extra search and push both beat every refresh rule. When one shard takes all of a step’s new passages, fresh summaries win on new topics and push wins on mixed topics. When eight shards share them, push wins on mixed topics; on new topics there is no reliable winner until the largest budget, where push wins. The next three slides show each case.
+When each new passage goes to the shard with the nearest starting center, extra search and push both beat every refresh rule. When one shard takes all of a step’s new passages, fresh summaries win on new topics and push wins on mixed topics. When eight shards share them, push wins on mixed topics; on new topics, refresh has only a fragile lead at the smallest budget, there is no clear winner at the middle one, and push wins at the largest. The next three slides show each case.
 
-## 9. By topic, extra search and push win
+## 9. Here, extra search and push win
 
 *About 45 seconds*
 
-First case: each new passage goes to the shard whose starting topic is closest. Here the old summaries keep working, because new passages land exactly where the old summaries already send questions.
+First case: each new passage goes to the shard whose starting center is nearest. Here the old summaries mostly keep working, because new passages often land where the old summaries already send questions.
 
 Even refreshing every summary at every step, which ignores the budget, gains only about two and a quarter points on new topics, and on mixed topics the half-point change is not a clear difference.
 
@@ -132,7 +132,7 @@ The bars at the bottom show how well each signal ranks shards by their real bene
 
 *About 50 seconds*
 
-These are the checks that changed the project along the way. A trial run showed that refreshing barely helped when new passages join their topic’s shard, so we added placements where old summaries really fail. A code review found that with one active shard every rule must make the same choice, before we wasted any runs. The planned extra search could see a whole step’s questions in advance, so we added a fair live version; seeing ahead was worth very little. We noticed that the most-changed rule’s tiny score messages were free, and a clearly labeled follow-up charged them. And a chance-level check matched simple math: two shards out of thirty-two.
+These are the checks that changed the project along the way. A trial run showed that refreshing barely helped when new passages join the shard with the nearest starting center, so we added placements where old summaries really fail. A code review found that with one active shard every rule must make the same choice, before we wasted any runs. The planned extra search could see a whole step’s questions in advance, so we added a fair live version; seeing ahead was worth very little. We noticed that the most-changed rule’s tiny score messages were free, and a clearly labeled follow-up charged them. And a chance-level check matched simple math: two shards out of thirty-two.
 
 The road blockers were practical. Each run needed several gigabytes of memory, and the first big batch crashed, so I built a runner that restarts only the unfinished runs and ran fewer jobs at once; later batches still needed a few reruns. An AI drafting tool once typed numbers with no source, so every result number is now generated by scripts and checked. And the first paper was too dense, so there is now a plain-English version.
 

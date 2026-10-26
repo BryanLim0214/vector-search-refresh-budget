@@ -1,0 +1,45 @@
+% Figure 1 drawing (TikZ). Every label is a word used in the text.
+\begin{tikzpicture}[yscale=0.79, font=\scriptsize, >={Stealth[length=4pt]},
+  shard/.style={draw, rounded corners=2pt, minimum width=1.15cm, minimum height=0.8cm, fill=white, align=center},
+  summ/.style={draw, minimum width=0.42cm, minimum height=0.42cm, inner sep=0pt, fill=white},
+  tag/.style={circle, draw, very thick, fill=white, inner sep=0.6pt, font=\scriptsize\bfseries}]
+% Coordinator with one summary per shard and a store for pushed passages.
+\draw[rounded corners=3pt, fill=black!5] (-4.2,2.15) rectangle (4.2,4.0);
+\node[anchor=north west, font=\footnotesize\bfseries] at (-4.15,3.97) {Coordinator};
+\node[anchor=north west] at (-4.15,3.55) {one summary per shard (\RNumCentersPerSummary{} vectors each)};
+\node[summ] (u1) at (-3.8,2.75) {1};
+\node[summ] (u2) at (-3.2,2.75) {2};
+\node[summ, draw=red!75!black, dashed, very thick] (u3) at (-2.6,2.75) {3};
+\node at (-2.0,2.75) {$\cdots$};
+\node[summ] (u32) at (-1.4,2.75) {32};
+\node[anchor=west, text=red!75!black, align=left] at (-1.05,2.75) {summary 3 is\\out of date};
+\node[draw, fill=white, align=center] (pushed) at (2.9,2.85) {pushed passages,\\[-1pt]checked for\\[-1pt]every query};
+% Query: it enters the coordinator, which compares it with the summaries and also checks the pushed passages.
+\node[anchor=south] (q) at (1.0,4.35) {query};
+\draw[->, thick] (q.south) to (1.0,3.38) to (0.32,3.38);
+\draw[->, thick, densely dotted] (1.0,3.38) to node[above, pos=0.6, inner sep=1.5pt] {also checks} (pushed.north);
+% Shards.
+\node[shard] (s1) at (-3.45,0) {Shard 1};
+\node[shard] (s2) at (-2.05,0) {Shard 2};
+\node[shard, minimum width=2.1cm] (s3) at (0.15,0) {Shard 3\\[1pt]{\color{red!75!black}\hspace{9pt}new match}};
+\node[star, star points=5, star point ratio=2.3, fill=red!75!black, inner sep=1.15pt] at (-0.47,-0.15) {};
+\node at (1.9,0) {$\cdots$};
+\node[shard] (s32) at (3.45,0) {Shard 32};
+% The two searched shards.
+\draw[->, thick] (-3.45,2.15) to (-3.45,0.4);
+\draw[->, thick] (-2.05,2.15) to (-2.05,0.4);
+\node at (-2.75,1.25) {searched};
+% New passages arriving at shard 3.
+\foreach \x in {-0.2,0.05,0.3,0.55} { \fill[red!75!black] (\x,-0.8) circle (1.6pt); }
+\draw[->, red!75!black, thick] (0.15,-0.7) to (0.15,-0.4);
+\node[anchor=north, text=red!75!black] at (0.15,-0.9) {new passages};
+% The three options: arrows with number tags.
+\draw[->, very thick, blue!70!black] (-0.65,0.4) to node[pos=0.5, tag, draw=blue!70!black, text=blue!70!black] {1} (u3.south);
+\draw[->, very thick, green!45!black, dashed] (0.4,2.15) to node[pos=0.5, tag, draw=green!45!black, text=green!45!black] {2} (0.4,0.4);
+\draw[->, very thick, orange!85!black] (1.05,0.4) to node[pos=0.5, tag, draw=orange!85!black, text=orange!85!black] {3} (pushed.south);
+% Key for the three options.
+\node[anchor=north west, align=left] at (-4.15,-1.35) {%
+{\color{blue!70!black}\textbf{(1) refresh:}} a shard sends a fresh summary\\
+{\color{green!45!black}\textbf{(2) extra search:}} the coordinator also asks the shard whose summary ranks third\\
+{\color{orange!85!black}\textbf{(3) push:}} shards send copies of new passages to the coordinator};
+\end{tikzpicture}

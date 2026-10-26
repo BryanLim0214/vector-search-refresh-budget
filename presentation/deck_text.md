@@ -192,7 +192,7 @@ Visible text:
 - What arrives, and how we score it
 - Blocks are shards. Shaded blocks receive the orange new passages.
 - Data: 100,000 web passages and 1,000 real search questions from MS MARCO, a public data set. A small language model turns each into 384 numbers that capture its meaning.
-- Placement: by topic (the shard with the closest topic), one shard (all of a step’s passages on one shard), or eight shards (spread over eight).
+- Placement: starting center (each passage goes to the shard with the closest starting center), one shard (all of a step’s passages on one shard), or eight shards (the closest of eight active shards, so some get more).
 - Topics: mixed (random order) or new (held back at the start). Budgets of 2, 4 or 8 summaries; 50, 200 or 800 questions per step; five repeats with different random starts, called seeds.
 - Recent recall, our main score
 - Of a question’s 10 true best matches from the last two steps, the share the system found. Overall recall counts all 10.
@@ -207,9 +207,9 @@ About 55 seconds
 
 The data are one hundred thousand passages from MS MARCO, a public set of web passages and real search questions. A small language model turns each passage into a list of three hundred eighty-four numbers that capture its meaning. We use a thousand test questions, and keep sixty-four other questions apart for the probe.
 
-The animation shows the three placements we test, meaning where a new passage is stored: on the shard with the closest topic, all on one shard per time step, or spread over eight shards per time step. New passages come either in mixed topic order or from new topics that were held back at the start.
+The animation shows the three placements we test, meaning where a new passage is stored: on the shard whose starting center is closest, all on one shard per time step, or on whichever of eight active shards has the closest topic, so some of the eight get more than others. New passages come either in mixed topic order or from new topics that were held back at the start.
 
-Our main score is recent recall. Take a question’s ten true best matches, keep the ones that arrived in the last two steps, and ask what share the system found. Overall recall is the same, counting all ten. Every setting is repeated five times with different random starts, called seeds. We resample the questions and seeds many times, and we call a difference clear only when its ninety-five percent range stays on one side of zero. And we wrote the plan and the tests down before the main analysis, so we could not pick the tests after seeing the results.
+Our main score is recent recall. Take a question’s ten true best matches, keep the ones that arrived in the last two steps, and ask what share the system found. Overall recall is the same, counting all ten. Every setting is repeated five times with different random starts, called seeds. We resample the questions and seeds many times, and we call a difference clear only when its ninety-five percent range stays on one side of zero. We wrote the plan and the tests down before the main analysis, and the one follow-up we added after seeing results is labeled as exploratory.
 
 This slide covers the metrics, data and workload parts of the rubric.
 
@@ -220,12 +220,12 @@ Visible text:
 - Main finding
 - Where new data lands decides.
 - It decides which use of the bytes finds new matches best:
-- Placed by topic
+- Starting-center placement
 - Extra search and push beat every refresh rule.
 - One active shard
 - Fresh summaries win on new topics; push wins on mixed topics.
 - Eight active shards
-- Push wins on mixed topics. On new topics, no reliable winner until the largest budget, where push wins.
+- Push wins on mixed topics. On new topics, refresh has only a fragile lead at budget 2, no clear winner at 4, and push wins at 8.
 - Default settings: budget 4, 200 questions per step, unless a budget is named
 - 08 / 15
 
@@ -235,14 +235,14 @@ About 30 seconds
 
 Here is the main finding in one sentence: where new data lands decides how to spend the network budget.
 
-When new passages go to the shard with the closest topic, extra search and push both beat every refresh rule. When one shard takes all of a step’s new passages, fresh summaries win on new topics and push wins on mixed topics. When eight shards share them, push wins on mixed topics; on new topics there is no reliable winner until the largest budget, where push wins. The next three slides show each case.
+When each new passage goes to the shard with the nearest starting center, extra search and push both beat every refresh rule. When one shard takes all of a step’s new passages, fresh summaries win on new topics and push wins on mixed topics. When eight shards share them, push wins on mixed topics; on new topics, refresh has only a fragile lead at the smallest budget, there is no clear winner at the middle one, and push wins at the largest. The next three slides show each case.
 
 ## Slide 9 (result1)
 
 Visible text:
 
-- Result 1 · new passages placed by topic
-- By topic, extra search and push win
+- Result 1 · starting-center placement
+- Here, extra search and push win
 - Gain over the best refresh rule, in points
 - +2.76
 - +2.55
@@ -255,7 +255,7 @@ Visible text:
 - Planned extra search
 - Live extra search
 - Push
-- Here each new passage goes to the shard with the closest starting topic, so the old summaries already send questions to the right shards.
+- Here each new passage goes to the shard with the nearest starting center, so the old summaries often already send questions to the right shards.
 - +2.29
 - points from refreshing every summary every step, on new topics. On mixed topics, +0.55, not a clear difference.
 - At the same bytes, every bar is a clear win over the best refresh rule.
@@ -268,7 +268,7 @@ Speaker notes:
 
 About 45 seconds
 
-First case: each new passage goes to the shard whose starting topic is closest. Here the old summaries keep working, because new passages land exactly where the old summaries already send questions.
+First case: each new passage goes to the shard whose starting center is nearest. Here the old summaries mostly keep working, because new passages often land where the old summaries already send questions.
 
 Even refreshing every summary at every step, which ignores the budget, gains only about two and a quarter points on new topics, and on mixed topics the half-point change is not a clear difference.
 
@@ -420,7 +420,7 @@ Visible text:
 - Surprises in the data
 - Trial run. Refresh gained little, because old summaries already pointed to the new passages. We added placements where they fail.
 - One-shard tie. Every rule must refresh the one changed shard. Code review caught this before the runs.
-- Seeing ahead. Planned extra search sees the whole step. A fair live version showed this was worth at most 0.21 points by topic, 0.30 with eight shards.
+- Seeing ahead. Planned extra search sees the whole step. A fair live version showed this was worth at most 0.21 points with starting-center placement, 0.30 with eight shards.
 - Free messages. Most-changed’s 128 score bytes per step went uncharged. The budget buys whole summaries, so charging them costs one summary; a labeled follow-up did that.
 - Chance check. With one shard and mixed topics, never refreshing found 6.27% of new matches: about random guessing, 2 of 32 shards.
 - Road blockers
@@ -434,7 +434,7 @@ Speaker notes:
 
 About 50 seconds
 
-These are the checks that changed the project along the way. A trial run showed that refreshing barely helped when new passages join their topic’s shard, so we added placements where old summaries really fail. A code review found that with one active shard every rule must make the same choice, before we wasted any runs. The planned extra search could see a whole step’s questions in advance, so we added a fair live version; seeing ahead was worth very little. We noticed that the most-changed rule’s tiny score messages were free, and a clearly labeled follow-up charged them. And a chance-level check matched simple math: two shards out of thirty-two.
+These are the checks that changed the project along the way. A trial run showed that refreshing barely helped when new passages join the shard with the nearest starting center, so we added placements where old summaries really fail. A code review found that with one active shard every rule must make the same choice, before we wasted any runs. The planned extra search could see a whole step’s questions in advance, so we added a fair live version; seeing ahead was worth very little. We noticed that the most-changed rule’s tiny score messages were free, and a clearly labeled follow-up charged them. And a chance-level check matched simple math: two shards out of thirty-two.
 
 The road blockers were practical. Each run needed several gigabytes of memory, and the first big batch crashed, so I built a runner that restarts only the unfinished runs and ran fewer jobs at once; later batches still needed a few reruns. An AI drafting tool once typed numbers with no source, so every result number is now generated by scripts and checked. And the first paper was too dense, so there is now a plain-English version.
 
@@ -455,7 +455,7 @@ Visible text:
 - 10 + 8
 - pages: full paper and plain-English version
 - Now
-- Experiments done, both papers drafted, code public.
+- Experiments done, full paper drafted, plain-English version in final checks, code public.
 - Before 24 Nov
 - Final checks, my own full read, and the choice of version to submit.
 - 24 Nov

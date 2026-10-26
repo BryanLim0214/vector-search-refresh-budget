@@ -1,9 +1,16 @@
-# Where to Spend Maintenance Bytes in Sharded Vector Search
+# Finding New Data in a Vector Database Split Across Servers
 
-This repository holds the simulator, experiment settings, analysis code, result tables, paper and a
-selected review record for the paper "Where to Spend Maintenance Bytes in Sharded Vector Search:
-Summary Refresh, Extra Shard Searches, or Vector Push". All experiments run in a simulator on one
-computer. No real network is used; the simulator counts the bytes that each network message would take.
+This repository holds the simulator, experiment settings, analysis code, result tables, two versions of
+the paper, a midterm presentation and a selected review record. The two papers report the same
+experiments:
+
+- `paper_plain/main.pdf`: "Finding New Data in a Vector Database Split Across Servers: How to Spend a
+  Fixed Network Budget", an 8-page plain-English version written for readers new to the field.
+- `paper/main.pdf`: "Where to Spend Maintenance Bytes in Sharded Vector Search: Summary Refresh, Extra
+  Shard Searches, or Vector Push", the full 10-page version with every test and number.
+
+All experiments run in a simulator on one computer. No real network is used; the simulator counts the
+bytes that each network message would take.
 
 ## The question
 
@@ -38,8 +45,8 @@ given in percentage points: going from 30% to 33% recall is a gain of 3 percenta
 
 ## What it found
 
-These points restate the paper's abstract and conclusion in plain words. Numbers are rounded; the paper
-(`paper/main.pdf`) gives exact values with 95% confidence intervals.
+These points restate the full paper's abstract and conclusion in plain words. Numbers are rounded; the
+full paper (`paper/main.pdf`) gives exact values with 95% confidence intervals.
 
 The best choice depends on where new passages are stored.
 
@@ -85,7 +92,9 @@ The best choice depends on where new passages are stored.
 | `tests/` | Automated tests (pytest). |
 | `data/` | Only `PROVENANCE.json`. The vectors are not included; `dvs/data.py` makes them. |
 | `docs/` | Design notes (`DESIGN.md`), changes to the plan (`DEVIATIONS.md`), and the commit ID map (`COMMIT_MAP.md`). |
-| `paper/` | The paper: LaTeX sources, the number and figure scripts, and the built `main.pdf`. |
+| `paper/` | The full paper: LaTeX sources, the number and figure scripts, and the built `main.pdf`. |
+| `paper_plain/` | The short plain-English paper: LaTeX sources, its figure script, and the built `main.pdf`. |
+| `presentation/` | The 15-slide midterm presentation as a PowerPoint file, its speaker script, slide images and slide sources; `presentation/README.md` explains each file. |
 | `audit/` | Five selected review reports; `audit/README.md` explains each one. |
 | `run_addendum2.cmd` | The original Addendum 2 launcher, kept as a record. It uses the author's local paths. |
 | `requirements.lock.txt` | Exact package versions. |
@@ -251,8 +260,34 @@ latexmk -pdf main.tex
 Without the raw run folders, `gen_numbers.py` stops with a missing-file error and leaves the committed
 `numbers.tex` as it is. Skip it in that case; `latexmk` then uses the committed numbers.
 
-`gen_numbers.py` also writes `paper_plain/generated/numbers.tex` for a shorter plain-English version of
-the paper, which is not in this repository yet.
+`gen_numbers.py` also writes `paper_plain/generated/numbers.tex`, the numbers for the short plain-English
+paper. That paper builds the same way from `paper_plain/`; its figure comes from
+`paper_plain/scripts/gen_figures_plain.py`, run from the repository root:
+
+```powershell
+.venv\Scripts\python.exe paper_plain\scripts\gen_figures_plain.py
+cd paper_plain
+latexmk -pdf main.tex
+```
+
+`scripts\plain_gates.py` builds the short paper and prints its checks: at most 8 pages, no math in the
+abstract, introduction or conclusion, sentence length, numbers per sentence, reading grade level,
+citations and the double-blind check.
+
+The short paper renames some methods and settings to plainer words:
+
+| Short paper | Full paper and code |
+|---|---|
+| most-changed | data change (`data_change`) |
+| sample-query probe | recovered neighbor (`recovered_neighbor`) |
+| most-searched | query popularity (`ql`) |
+| largest-shard | shard size (`ss`) |
+| rotation | round robin (`round_robin`) |
+| push | vector push (`push_vectors`) |
+| planned and live extra search | extra search and online extra search (`extra_search`, `extra_search_online`) |
+| refresh all | always fresh (`always_fresh`) |
+| starting-center, one-shard and eight-shard placement | M1, M2 and M3 |
+| mixed-topic and new-topic stream | steady and new-topic stream |
 
 The PDF builds from the committed sources alone. Use TeX Live (the author used TeX Live 2025) and make
 sure its `latexmk` comes first on your PATH; a `latexmk` without Perl, as in some MiKTeX setups, fails
@@ -306,11 +341,17 @@ source, recomputed reported numbers, and wrote or edited text in every section. 
 Codex (OpenAI) reviewed drafts; Codex edited no files. Result numbers come from scripts run on stored
 run outputs. The authors take responsibility for the content.
 
+The short paper's Acknowledgment states: Gemini (Google) drafted the simulator, analysis code, and number
+scripts, and an earlier draft of the text. Claude (Anthropic) rewrote that draft into this version, wrote
+the figure code, added scripted number commands, checked each citation against its source, and
+recomputed reported numbers. Gemini, Claude, and Codex (OpenAI) reviewed drafts; Codex edited no files.
+Claude also built the presentation from the paper's numbers.
+
 For this repository: the reports in `audit/` come from that checking. Claude also helped put the
 repository together; it adapted the script paths and wrote this README and `audit/README.md`.
 
 ## License
 
 The code is released under the MIT license; see `LICENSE` (copyright 2026 Bryan Lim). The paper text and
-figures in `paper/`, including `paper/main.pdf`, are included for reference and are not covered by the
-MIT license. The MS MARCO data has its own license and is not included.
+figures in `paper/` and `paper_plain/`, including both `main.pdf` files, and the slides in
+`presentation/` are included for reference and are not covered by the MIT license. The MS MARCO data has its own license and is not included.

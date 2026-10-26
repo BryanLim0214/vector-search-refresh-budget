@@ -1,0 +1,15 @@
+\section{Limits and What We Did Not Test}
+\label{sec:limits}
+
+Our simulator runs as a single program, so all shards share one machine.
+It does not model network delays, waiting in queues, work done at the same time, or failures.
+All runs use one data set and one text model, with \RNumCorpusTotalPassages{} passages drawn once with a fixed seed.
+They also use five seeds and fixed sizes: \RNumNumShards{} shards, two searched shards per query, and \RNumCentersPerSummary{} centers per summary.
+
+About \RNumSteadyEpochInsertVecs{} passages arrive per time step, and a summary stays the same size as arrivals grow.
+But the share of new passages that push can keep at a fixed budget falls, so higher arrival rates may favor refresh.
+In one-shard and eight-shard placement, new passages join shards that keep their starting passages, and a fresh summary covers the whole shard.
+On mixed topics this lowered overall recall, plausibly because the centers shift toward the random new passages.
+Separate summaries for new data might avoid this, but we did not model them.
+A coordinator that knows which shards are open could also reach them without upkeep traffic.
+Saving re-sent summary bytes, carrying unused bytes over, and a refresh rule based on the plain count are also untested.

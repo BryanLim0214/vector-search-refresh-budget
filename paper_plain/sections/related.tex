@@ -1,0 +1,48 @@
+\section{Related Work}
+\label{sec:related}
+
+% Every sentence that cites or describes a cited work is marked CITE-PLAIN: it rewords the long paper's citing
+% sentence (file:line given) without adding a claim. audit/PLAIN_CLAIMS.md gives the verbatim sources/LEDGER.md quote.
+
+Earlier work has studied which items to fetch or refresh first.
+% CITE-PLAIN: paper/sections/related.tex:4 (pandey2008crawlorder).
+Pandey and Olston \cite{pandey2008crawlorder} first fetch the new web pages that would appear most often in the top results for a set of queries.
+% CITE-PLAIN: paper/sections/related.tex:8 (olston2002besteffort, first sentence).
+Olston and Widom \cite{olston2002besteffort} study how to keep stored copies as fresh as possible when network capacity is too small for exact copies.
+% CITE-PLAIN: paper/sections/related.tex:8 (olston2002besteffort, second sentence).
+In their design, each source ranks its own changed items by priority and refreshes those above its own estimate of a shared cutoff.
+% Our work (paper/sections/related.tex:14).
+Our sample-query probe adapts these ideas to shard summaries, and we compare refreshing with two other uses of the same budget.
+
+Out-of-date summaries also arise in search systems that send each query to only a few document collections.
+% CITE-PLAIN: paper/sections/related.tex:6 (ipeirotis2005changes, shokouhi2007updating).
+When the collections change, the summaries used to pick them go out of date \cite{ipeirotis2005changes,shokouhi2007updating}.
+% CITE-PLAIN: paper/sections/related.tex:6 (shokouhi2007updating).
+Shokouhi et al. \cite{shokouhi2007updating} test forty-four changing collections and show that out-of-date collection summaries lower search accuracy.
+% CITE-PLAIN: paper/sections/related.tex:6 (shokouhi2007updating, the three policies; query log glossed).
+They propose three update policies: update all collections evenly, update more often those that past queries used most, or update by collection size.
+% Our work (paper/sections/related.tex:14).
+Three of our refresh rules adapt these policies, and we also try two uses of the budget that refresh nothing.
+
+% CITE-PLAIN: paper/sections/related.tex:10 (jose2026repartition, first sentence).
+Jose \cite{jose2026repartition} studies when a vector index, a structure that sorts vectors into groups to speed up search, must regroup them as the data changes.
+% CITE-PLAIN: paper/sections/related.tex:10 (jose2026repartition, the answer).
+The answer depends on how many groups each query searches, and on how much room that leaves to spare.
+% CITE-PLAIN: paper/sections/related.tex:10 (jose2026repartition, second sentence).
+Slightly outdated group centers, which mark where each group lies, can then be offset by searching a few more groups.
+% Our work (paper/sections/related.tex:10 and :14).
+That work concerns one index, and our extra search tests a similar trade-off across servers: ask one more shard instead of refreshing summaries.
+
+Finally, some systems spread vector search over many servers.
+% CITE-PLAIN: paper/sections/related.tex:12 and system.tex:30 (guo2022manu, segments); hash clause dropped.
+Guo et al. \cite{guo2022manu} present Manu, a vector database that writes new data into open blocks called segments.
+% CITE-PLAIN: paper/sections/related.tex:12 (guo2022manu, sealing rule).
+A segment is closed to new data once it reaches a size limit or sits idle for some time.
+% Our work (paper/sections/system.tex:30).
+Our one-shard placement, where each time step's new data goes to one shard, loosely models such systems.
+% CITE-PLAIN: paper/sections/related.tex:12 (semord2026); synopsis, heartbeat and later clauses dropped.
+Wang et al. \cite{semord2026} present Semord, where servers work as equals without a central coordinator.
+% CITE-PLAIN: paper/sections/related.tex:12 (semord2026, extra peers); the coordinator-baseline clause dropped.
+To make up for queries sent to the wrong servers, Semord's servers contact extra servers, which resembles our extra search.
+% Our work (paper/sections/related.tex:12).
+We instead study a system with a coordinator whose summaries go out of date under a fixed byte budget.

@@ -1714,6 +1714,297 @@ def build_all_macros() -> dict[str, str]:
         f"${100.0 * float(np.mean(np.concatenate(x4_es_late))):+.2f}$~pp"
     )
 
+    # --- plain paper macros ---
+    # Simpler forms for the short plain-English paper in paper_plain/. Every value below is computed from the
+    # same CSV rows, run outputs, or local values that the macros above use; nothing is typed except the design
+    # constants that the macros above also use as inputs (each noted). The long paper never reads these macros,
+    # so get_used_macros() prunes them from paper/generated/numbers.tex.
+    def _pts1(frac: float) -> str:
+        """Absolute gap in percentage points, one decimal, from a recall difference on [0, 1]."""
+        return f"{abs(100.0 * frac):.1f}"
+
+    def _pts2(frac: float) -> str:
+        """Absolute gap in percentage points, two decimals, for small or fragile gaps."""
+        return f"{abs(100.0 * frac):.2f}"
+
+    def _pct1(frac: float) -> str:
+        """Recall level on [0, 1] as a percentage with one decimal."""
+        return f"{100.0 * frac:.1f}\\%"
+
+    def _pct0(frac: float) -> str:
+        """Share on [0, 1] as a whole percentage."""
+        return f"{100.0 * frac:.0f}\\%"
+
+    def _cell(r: dict[str, str]) -> str:
+        """Table cell for a paired_comparisons.csv row: signed mean and 95% bootstrap range, no 'pp'."""
+        return fmt_pp_ci_nopp(
+            float(r["recent_diff_mean"]), float(r["recent_diff_ci95_low"]), float(r["recent_diff_ci95_high"])
+        )
+
+    # Design constants, the same inputs used above: 1,536-byte vectors (24,576 / 16 centers, see
+    # RNumRNSetupBroadcastBytes), 120-byte reply of 10 x (8-byte ID + 4-byte score) (98,304 // 1,656 above),
+    # 8-byte ID (98,304 // 1,544 above), top-10 lists (recall_at_10 columns), 64 new-topic clusters and the
+    # 1,000-query test set (paper/sections/setup.tex:36), and the 30-epoch early split used for X4 above.
+    macros["RNumPlainVectorBytes"] = fmt_int(24576 // 16)
+    macros["RNumPlainIdBytes"] = fmt_int(1544 - 1536)
+    macros["RNumPlainSearchBytes"] = fmt_int(1536 + 10 * (8 + 4))
+    macros["RNumPlainPushBytes"] = fmt_int(1536 + 8)
+    macros["RNumPlainTopK"] = fmt_int(10)
+    macros["RNumPlainTopicClusters"] = fmt_int(64)
+    macros["RNumPlainTestQueries"] = fmt_int(1000)
+    macros["RNumPlainXFourEarlySteps"] = fmt_int(30)
+    macros["RNumPlainGateThreshold"] = macros["RNumGateThresholdPP"].replace("~pp", "")
+    import inspect as _inspect
+
+    macros["RNumPlainBootReps"] = fmt_int(
+        _inspect.signature(two_stage_boot_ci_95).parameters["n_boot"].default
+    )
+
+    # Query rates from m1_conditions.csv
+    q_rates = sorted({int(r["queries_per_epoch"]) for r in m1})
+    assert q_rates == [50, 200, 800]
+    macros["RNumPlainQueriesLow"] = fmt_int(q_rates[0])
+    macros["RNumPlainQueriesDefault"] = fmt_int(q_rates[1])
+    macros["RNumPlainQueriesHigh"] = fmt_int(q_rates[2])
+
+    # Share of queries with at least one recent neighbor at Q=200 (same rows as RNumQueriesWithRecentFrac*)
+    for stream, s_tag in [("steady", "Steady"), ("new_topic", "NewTopic")]:
+        r = find_row(m1, stream_mode=stream, queries_per_epoch="200", policy="never_refresh")
+        n_with = int(r["n_queries_with_recent"])
+        n_tot = n_with + int(r["n_queries_without_recent"])
+        macros[f"RNumPlainQueriesWithRecentPct{s_tag}"] = _pct0(n_with / n_tot)
+
+    # Recent recall levels in percent (same rows as RNumMOne*/RNumMTwo*/RNumMThree* level macros)
+    lvl_pols = [
+        ("never_refresh", "NR"),
+        ("round_robin", "RR"),
+        ("data_change", "DC"),
+        ("recovered_neighbor", "RN"),
+        ("ql", "QL"),
+        ("ss", "SS"),
+        ("always_fresh", "AF"),
+    ]
+    for stream, s_tag in [("steady", "Steady"), ("new_topic", "NewTopic")]:
+        for pol, p_tag in lvl_pols:
+            r = find_row(m1, stream_mode=stream, queries_per_epoch="200", policy=pol)
+            macros[f"RNumPlainLvlMOne{p_tag}{s_tag}"] = _pct1(float(r["recent_recall_at_10_mean"]))
+            for b_val, b_tag in [("2", "BTwo"), ("4", "BFour"), ("8", "BEight")]:
+                r3 = find_row(m3, stream_mode=stream, budget_summaries=b_val, policy=pol)
+                macros[f"RNumPlainLvlMThree{b_tag}{p_tag}{s_tag}"] = _pct1(float(r3["recent_recall_at_10_mean"]))
+        for pol, p_tag in [("never_refresh", "NR"), ("always_fresh", "AF")]:
+            r2 = find_row(m2, stream_mode=stream, budget_summaries="4", policy=pol)
+            macros[f"RNumPlainLvlMTwo{p_tag}{s_tag}"] = _pct1(float(r2["recent_recall_at_10_mean"]))
+
+    # H1 (M1 always_fresh - never_refresh)
+    for stream, s_tag in [("steady", "Steady"), ("new_topic", "NewTopic")]:
+        r = find_row(paired, experiment="M1", stream_mode=stream, comparison_type="H1_gate_M1")
+        macros[f"RNumPlainCellHOneGap{s_tag}"] = _cell(r)
+        macros[f"RNumPlainHOne{s_tag}"] = _pts1(float(r["recent_diff_mean"]))
+
+    # H2 and H2b (same find_row calls as RNumHTwo*)
+    h2_recent, es_overall, pv_overall = [], [], []
+    for stream, s_tag, best_pol in [
+        ("steady", "Steady", "recovered_neighbor"),
+        ("new_topic", "NewTopic", "data_change"),
+    ]:
+        r_es = find_row(paired, experiment="M1", stream_mode=stream, queries_per_epoch="200",
+                        policy_a="extra_search", policy_b=best_pol)
+        r_pv = find_row(paired, experiment="M1", stream_mode=stream, queries_per_epoch="200",
+                        policy_a="push_vectors", policy_b=best_pol)
+        r_eso = find_row(paired, experiment="M1+M1_online", stream_mode=stream, queries_per_epoch="200",
+                         policy_a="extra_search_online", policy_b=best_pol)
+        macros[f"RNumPlainCellHTwoES{s_tag}"] = _cell(r_es)
+        macros[f"RNumPlainCellHTwoESO{s_tag}"] = _cell(r_eso)
+        macros[f"RNumPlainCellHTwoPV{s_tag}"] = _cell(r_pv)
+        h2_recent += [float(r["recent_diff_mean"]) for r in (r_es, r_eso, r_pv)]
+        es_overall += [float(r["overall_diff_mean"]) for r in (r_es, r_eso)]
+        pv_overall.append(float(r_pv["overall_diff_mean"]))
+    macros["RNumPlainHTwoMin"] = _pts1(min(h2_recent))
+    macros["RNumPlainHTwoMax"] = _pts1(max(h2_recent))
+    macros["RNumPlainESOverallMin"] = _pts1(min(es_overall))
+    macros["RNumPlainESOverallMax"] = _pts1(max(es_overall))
+    macros["RNumPlainPVOverallMin"] = _pts1(min(pv_overall))
+    macros["RNumPlainPVOverallMax"] = _pts1(max(pv_overall))
+
+    # Vector push sampling check on M1 steady (same values as RNumMOnePVPredRecentSteady, RNumMOnePVRecentSteady)
+    macros["RNumPlainMOnePVPredPctSteady"] = _pct1(pv_pred_m1_s)
+    macros["RNumPlainMOnePVPctSteady"] = _pct1(float(r_pv_m1["recent_recall_at_10_mean"]))
+
+    # Query-rate sweep at Q=800 on new_topic (same rows as RNumQSweepRefMinusES*/ESO*)
+    rb800 = find_row(bq, stream_mode="new_topic", queries_per_epoch="800")
+    rbo800 = find_row(bqo, stream_mode="new_topic", queries_per_epoch="800")
+    macros["RNumPlainQSweepESHigh"] = _pts1(float(rb800["refresh_minus_extra_search_mean"]))
+    macros["RNumPlainQSweepESOHigh"] = _pts1(float(rbo800["refresh_minus_extra_search_online_mean"]))
+
+    # Look-ahead gap at Q >= 200 (lookahead_comparison.csv, M1 rows at Q=200 and Q=800, both streams)
+    lk_hi = [
+        float(r["recent_diff_mean"])
+        for r in lookahead
+        if r.get("experiment") == "M1+M1_online" and r.get("queries_per_epoch") in ("200", "800")
+    ]
+    assert len(lk_hi) == 4
+    macros["RNumPlainLookaheadMax"] = _pts2(max(lk_hi))
+
+    # M2 gate and H4 (same rows as RNumGateMTwo*, RNumHFourRefMinusPV*)
+    for stream, s_tag in [("steady", "Steady"), ("new_topic", "NewTopic")]:
+        rg = find_row(paired, experiment="M2", stream_mode=stream, comparison_type="GATE_M2")
+        macros[f"RNumPlainCellGateMTwo{s_tag}"] = _cell(rg)
+        macros[f"RNumPlainGateMTwoOverall{s_tag}"] = _pts1(float(rg["overall_diff_mean"]))
+    for b_val, b_tag in [("2", "BTwo"), ("8", "BEight")]:
+        r = find_row(paired, experiment="M2", stream_mode="new_topic", budget_summaries=b_val,
+                     comparison_type=f"H4_best_refresh_vs_push_vectors_B{b_val}")
+        macros[f"RNumPlainHFourPV{b_tag}NewTopic"] = _pts1(float(r["recent_diff_mean"]))
+
+    # M3 gate, H3b, H4b, PR3 (same rows as RNumGateMThree*, RNumHThreeBRNMinusDC*, RNumHFourB*, RNumPredMThree*)
+    for stream, s_tag in [("steady", "Steady"), ("new_topic", "NewTopic")]:
+        rg3 = find_row(paired, experiment="M3", stream_mode=stream, comparison_type="GATE_M3")
+        macros[f"RNumPlainCellGateMThree{s_tag}"] = _cell(rg3)
+        macros[f"RNumPlainGateMThree{s_tag}"] = _pts1(float(rg3["recent_diff_mean"]))
+        if stream == "steady":
+            macros["RNumPlainGateMThreeOverallSteady"] = _pts1(float(rg3["overall_diff_mean"]))
+        rh = find_row(paired, experiment="M3", stream_mode=stream, budget_summaries="4",
+                      policy_a="recovered_neighbor", policy_b="data_change",
+                      comparison_type="H3b_rn_vs_refresh_rules_B4")
+        macros[f"RNumPlainCellHThreeBRNMinusDC{s_tag}"] = _cell(rh)
+        if stream == "new_topic":
+            macros["RNumPlainHThreeBRNMinusDCNewTopic"] = _pts1(float(rh["recent_diff_mean"]))
+        r_rn8 = find_row(paired, experiment="M3", stream_mode=stream, budget_summaries="8",
+                         policy_a="recovered_neighbor", policy_b="always_fresh")
+        macros[f"RNumPlainPredRNBEight{s_tag}"] = _pts1(float(r_rn8["recent_diff_mean"]))
+    macros["RNumPlainGateMThreeMinSeedGap"] = f"{abs(gate_nt_seeds[min_gate_idx]):.1f}"
+    for b_val, b_tag in [("2", "BTwo"), ("8", "BEight")]:
+        r = find_row(paired, experiment="M3", stream_mode="new_topic", budget_summaries=b_val,
+                     comparison_type=f"H4b_best_refresh_vs_push_vectors_B{b_val}")
+        macros[f"RNumPlainHFourBPV{b_tag}NewTopic"] = _pts1(float(r["recent_diff_mean"]))
+        if b_val == "2":
+            macros["RNumPlainHFourBPVBTwoNewTopicLow"] = _pts2(float(r["recent_diff_ci95_low"]))
+    r = find_row(paired, experiment="M3", stream_mode="new_topic", budget_summaries="8",
+                 comparison_type="H4b_best_refresh_vs_extra_search_online_B8")
+    macros["RNumPlainHFourBESOBEightNewTopic"] = _pts1(float(r["recent_diff_mean"]))
+    macros["RNumPlainPVExcessMax"] = f"{max(pv_nt_excess_list):.1f}"
+    macros["RNumPlainESOUnderspendMax"] = f"{max(underspend_vals_pp):.2f}"
+
+    # Two-decimal percent levels for the H3b pair, so the prose levels differ by exactly the reported gap
+    for pol, p_tag in [("recovered_neighbor", "RN"), ("data_change", "DC")]:
+        r3 = find_row(m3, stream_mode="new_topic", budget_summaries="4", policy=pol)
+        macros[f"RNumPlainLvlTwoMThreeBFour{p_tag}NewTopic"] = f"{100.0 * float(r3['recent_recall_at_10_mean']):.2f}\\%"
+
+    # Exploratory Addendum 3 (same rows and arrays as RNumAddThree*)
+    for b_val, b_tag in [("2", "BTwo"), ("4", "BFour"), ("8", "BEight")]:
+        r = find_row(add3_paired, comparison_group="X1", stream_mode="new_topic", budget_summaries=b_val,
+                     policy_b="recovered_neighbor")
+        macros[f"RNumPlainXOneRN{b_tag}NewTopic"] = _pts1(float(r["recent_diff_mean"]))
+    for b_val, b_tag in [("2", "BTwo"), ("4", "BFour")]:
+        r = find_row(add3_paired, comparison_group="X3", stream_mode="new_topic", budget_summaries=b_val)
+        macros[f"RNumPlainXThreeDC{b_tag}NewTopic"] = _pts1(float(r["recent_diff_mean"]))
+    r = find_row(add3_paired, comparison_group="X2", stream_mode="new_topic", budget_summaries="2",
+                 policy_b="push_vectors")
+    macros["RNumPlainXTwoPVBTwoNewTopic"] = _pts2(float(r["recent_diff_mean"]))
+    r = find_row(add3_paired, comparison_group="X2", stream_mode="new_topic", budget_summaries="8",
+                 policy_b="push_vectors")
+    macros["RNumPlainXTwoPVBEightNewTopic"] = _pts1(float(r["recent_diff_mean"]))
+    r = find_row(add3_paired, comparison_group="X4", stream_mode="new_topic", policy_b="extra_search")
+    macros["RNumPlainXFourESNewTopic"] = _pts2(float(r["recent_diff_mean"]))
+    macros["RNumPlainXOneAllZeroGap"] = _pts1(float(np.mean(az_cat)))
+    macros["RNumPlainXOneNonZeroGap"] = _pts1(float(np.mean(nz_cat)))
+
+    # --- v2 additions (same sources as above) ---
+    # Waiting limit A = ceil(2S / n_B) (long paper system.tex:59): n_B = 4 for the zero-overhead rules and 3 for the
+    # probe at B = 4 (RNumFourRulesSummariesBFour, RNumRNSummariesBFour).
+    macros["RNumPlainCapBFour"] = fmt_int(math.ceil(2 * 32 / 4))
+    macros["RNumPlainCapRNBFour"] = fmt_int(math.ceil(2 * 32 / 3))
+    # H3b row flipped to "most-changed minus probe" (same CSV row as RNumPlainCellHThreeBRNMinusDC*)
+    for stream, s_tag in [("steady", "Steady"), ("new_topic", "NewTopic")]:
+        rh = find_row(paired, experiment="M3", stream_mode=stream, budget_summaries="4",
+                      policy_a="recovered_neighbor", policy_b="data_change",
+                      comparison_type="H3b_rn_vs_refresh_rules_B4")
+        macros[f"RNumPlainCellDCMinusRN{s_tag}"] = fmt_pp_ci_nopp(
+            -float(rh["recent_diff_mean"]), -float(rh["recent_diff_ci95_high"]), -float(rh["recent_diff_ci95_low"])
+        )
+    # One-shard refresh minus planned extra search on new_topic, all budgets (same rows as RNumHFourRefMinusES*)
+    m2_es_nt = [
+        float(find_row(paired, experiment="M2", stream_mode="new_topic", budget_summaries=b,
+                       comparison_type=f"H4_best_refresh_vs_extra_search_B{b}")["recent_diff_mean"])
+        for b in ("2", "4", "8")
+    ]
+    macros["RNumPlainHFourESMinNewTopic"] = _pts1(min(m2_es_nt))
+    macros["RNumPlainHFourESMaxNewTopic"] = _pts1(max(m2_es_nt))
+    # Charged most-changed minus push at Q=800, new_topic (same row as RNumAddThreeXFourPVNewTopic)
+    r = find_row(add3_paired, comparison_group="X4", stream_mode="new_topic", policy_b="push_vectors")
+    macros["RNumPlainXFourPVNewTopic"] = _pts1(float(r["recent_diff_mean"]))
+    # Look-ahead at Q=50 under topic placement and the live version's byte share there (same rows as
+    # RNumLookaheadMOneQFifty* and RNumMOneESOShareOfESQFifty*)
+    lk50 = [r for r in lookahead if r.get("experiment") == "M1+M1_online" and r.get("queries_per_epoch") == "50"]
+    assert len(lk50) == 2
+    macros["RNumPlainLKQFiftyMin"] = _pts1(min(float(r["recent_diff_mean"]) for r in lk50))
+    macros["RNumPlainLKQFiftyMax"] = _pts1(max(float(r["recent_diff_mean"]) for r in lk50))
+    share50 = [100.0 * float(r["budget_bytes_b_mean"]) / float(r["budget_bytes_a_mean"]) for r in lk50]
+    macros["RNumPlainESOShareQFifty"] = f"{float(np.mean(share50)):.0f}\\%"
+    # Look-ahead in eight-shard placement, all budgets and streams (same rows as RNumLookaheadMThree*)
+    lk3 = [float(r["recent_diff_mean"]) for r in lookahead if r.get("experiment") == "M3"]
+    assert len(lk3) == 6
+    macros["RNumPlainLookaheadMThreeMax"] = _pts2(max(lk3))
+    # Overall recall, live extra search minus push, eight-shard placement, all budgets and both streams
+    eso_pv_overall = [
+        float(find_row(paired, experiment="M3", stream_mode=st, budget_summaries=b,
+                       comparison_type=f"H4b_extra_search_online_vs_push_vectors_B{b}")["overall_diff_mean"])
+        for st in ("steady", "new_topic") for b in ("2", "4", "8")
+    ]
+    assert min(eso_pv_overall) > 0
+    macros["RNumPlainESOPVOverallMin"] = _pts1(min(eso_pv_overall))
+    macros["RNumPlainESOPVOverallMax"] = _pts1(max(eso_pv_overall))
+    # Search all shards: lowest recent recall over every condition, rounded down so "more than" holds
+    all_sh = [float(r["recent_recall_at_10_mean"]) for rows in (m1, m2, m3) for r in rows
+              if r.get("policy") == "all_shards"]
+    macros["RNumPlainAllShardsMinPct"] = f"{math.floor(1000.0 * min(all_sh)) / 10.0:.1f}\\%"
+    # The second addendum's run count, split into its two parts (same value as RNumAddendumTwoMTwoDone)
+    _done, _total = macros["RNumAddendumTwoMTwoDone"].strip("$").split("/")
+    macros["RNumPlainAddTwoRunsDone"] = fmt_int(int(_done))
+    macros["RNumPlainAddTwoRunsTotal"] = fmt_int(int(_total))
+
+    # --- v3 additions (same sources as above) ---
+    # Oracle routing level, nearest-shard placement, mixed topics, Q=200 (same row as RNumMOneOracleRecentSteady)
+    r_or_p = find_row(m1, stream_mode="steady", queries_per_epoch="200", policy="oracle_routing")
+    macros["RNumPlainOracleMOneSteadyPct"] = _pct1(float(r_or_p["recent_recall_at_10_mean"]))
+    # The simpler test's multiplier: the t quantile used by t_interval_95, recovered from the function itself
+    _probe = [0.0, 0.0, 0.0, 0.0, 1.0]
+    _m, _lo, _hi = t_interval_95(_probe)
+    _se = float(np.std(np.asarray(_probe), ddof=1) / math.sqrt(len(_probe)))
+    macros["RNumPlainTCritFive"] = f"{(_hi - _m) / _se:.1f}"
+    # The probe's total loss to uncharged most-changed at B=2, new topics (same value as
+    # RNumAddThreeRNMinusUnchargedDCBTwoNewTopicAbsMean: X1 minus X3)
+    macros["RNumPlainRNLossBTwoNewTopic"] = _pts1(rn_minus_dc_b2_nt_abs / 100.0)
+    # New-topic stream: mean streamed passages per time step, rounded to hundreds (RNumNewTopicStreamVecsMean / epochs)
+    _nt_mean = float(macros["RNumNewTopicStreamVecsMean"].strip("$").replace(",", ""))
+    _epochs = int(macros["RNumNumEpochs"].strip("$"))
+    macros["RNumPlainNewTopicStepVecs"] = fmt_int(int(round(_nt_mean / _epochs, -2)))
+
+    # --- v4 additions (same sources as above) ---
+    # Oracle routing level, eight-shard placement, both streams (same rows as RNumMThreeOracleRecent*)
+    for stream, s_tag in [("steady", "Steady"), ("new_topic", "NewTopic")]:
+        r_or3p = find_row(m3, stream_mode=stream, budget_summaries="4", policy="oracle_routing")
+        macros[f"RNumPlainOracleMThree{s_tag}Pct"] = _pct1(float(r_or3p["recent_recall_at_10_mean"]))
+    # Charged most-changed minus live extra search at Q=800, new topics (same row as RNumAddThreeXFourESONewTopic)
+    r = find_row(add3_paired, comparison_group="X4", stream_mode="new_topic", policy_b="extra_search_online")
+    macros["RNumPlainXFourESONewTopic"] = _pts2(float(r["recent_diff_mean"]))
+    assert float(r["recent_diff_boot_ci95_low"]) > 0
+    macros["RNumPlainXFourESONewTopicLow"] = _pts2(float(r["recent_diff_boot_ci95_low"]))
+    # Charged most-changed minus planned extra search at Q=800, new topics: later steps and overall recall
+    # (same arrays and row as RNumAddThreeXFourESNewTopicLateMean and RNumAddThreeXFourESOverallNewTopic)
+    _late = float(np.mean(np.concatenate(x4_es_late)))
+    assert _late < 0
+    macros["RNumPlainXFourLateGap"] = _pts2(_late)
+    r = find_row(add3_paired, comparison_group="X4", stream_mode="new_topic", policy_b="extra_search")
+    assert float(r["overall_diff_mean"]) < 0 < float(r["overall_diff_boot_ci95_high"])
+    macros["RNumPlainXFourOverallGap"] = _pts2(float(r["overall_diff_mean"]))
+    # Charged minus uncharged most-changed at B=8, new topics (same row as RNumAddThreeXThreeDCBEightNewTopic)
+    r = find_row(add3_paired, comparison_group="X3", stream_mode="new_topic", budget_summaries="8")
+    macros["RNumPlainXThreeDCBEightNewTopic"] = _pts2(float(r["recent_diff_mean"]))
+    # Push scan work as a multiple of the summary-scoring work (same values as RNumPVDotProdRatioB*)
+    macros["RNumPlainPVScanRatioBFour"] = macros["RNumPVDotProdRatioBFour"].strip("$").replace("\\times", "")
+    macros["RNumPlainPVScanRatioBEight"] = macros["RNumPVDotProdRatioBEight"].strip("$").replace("\\times", "")
+    # --- end plain paper macros ---
+
     return macros
 
 

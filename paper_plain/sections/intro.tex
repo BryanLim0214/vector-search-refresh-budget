@@ -1,0 +1,74 @@
+\section{Introduction}
+\label{sec:intro}
+
+A vector database stores items such as text passages as vectors.
+A vector is a list of numbers that an AI language model makes from a passage.
+Think of each vector as a point on a map, where passages with similar meaning sit close together.
+A search question, or query, becomes a vector the same way.
+The database returns the stored passages closest to it, which we call the query's best matches.
+
+A distributed vector database splits its data into parts called shards, each kept on its own server.
+A central server, the coordinator, sends each query to some of the shards and merges their answers.
+It works like a library with many branch buildings and one front desk.
+In the system we study, the coordinator sends each query to only two of the \RNumNumShards{} shards.
+To choose them, it keeps one summary per shard: a short list of vectors that mark where its passages lie.
+A summary is like a catalog card that lists the main topics a branch holds.
+It picks the two whose summaries come closest to the query.
+
+New passages keep arriving, but the coordinator keeps each shard's old summary until that shard sends a fresh one.
+An old summary is like an old catalog card that does not list the newest books.
+So a query may skip the shard that holds its best new match, and miss that match (Fig.~\ref{fig:problem}).
+This matters for questions about newly added documents, because their answers are in the newest passages.
+
+\begin{figure}[!t]
+\centering
+\input{sections/fig_problem}
+\caption{The problem and the three options. Shard~3 has new passages, but its summary at the coordinator is out of date, so the query can skip shard~3 and miss a new match. Shard~3's summary ranks third closest to the query, so extra search would also ask it.}
+\label{fig:problem}
+\end{figure}
+
+We study this problem with a simulator, a program that imitates the system one time step at a time.
+Each run lasts \RNumNumEpochs{} time steps, and about \RNumSteadyEpochInsertVecs{} new passages arrive per step on average.
+In each time step, the coordinator also answers a batch of queries, \RNumPlainQueriesDefault{} by default.
+The system may send upkeep messages, paid from a fixed budget of network bytes per time step.
+The budget works like a monthly phone data plan without rollover: unused bytes are lost.
+We count it in summaries: our default budget of four pays for four summaries per step.
+We also test budgets of two and eight.
+Even the largest is too small to refresh every shard each step.
+So the question is how to spend the budget, and we compare three options (Fig.~\ref{fig:problem}).
+The first option is to refresh: some shards send fresh summaries, chosen by a refresh rule.
+One such rule, most-changed, picks the shards whose data changed most.
+The second is extra search: when the coordinator is unsure which shards to ask, it also asks a third one.
+The third is push: shards send copies of their newest passages to the coordinator, which checks them for every query.
+
+We measure accuracy with recall, the share of a query's true best matches that the system returns.
+For example, if the system returns seven of ten true best matches, its recall is seven in ten.
+Recent recall counts only the best matches that arrived in the last two time steps.
+It shows how well the system finds new data, while overall recall counts all best matches, old or new.
+When we say that a method wins or is better, we mean that it has higher recent recall.
+A difference is clear when our statistical test shows that chance alone would rarely produce it.
+A clear lead is fragile when a further check casts doubt on it (Section~\ref{sec:stats}).
+Our simulator counts the bytes of every message the budget pays for.
+It checks every answer against the exact best matches.
+
+We vary where new passages land: with the most similar shard, all on one shard, or spread over eight shards.
+New passages either mix topics the shards already hold or bring new topics, one at a time.
+We wrote down our plan and tests before the main analysis; Section~\ref{sec:setup} lists its changes.
+
+When each new passage joins the most similar shard, old summaries often still send queries there.
+Refreshing then gains little, and at the default budget and query rate extra search and push beat every refresh rule.
+When one shard takes all of a time step's new passages, refresh wins by far on new topics.
+On mixed topics, fresh summaries barely help with new matches and slightly lower accuracy overall, so push wins.
+When eight shards share the new passages, push wins on mixed topics.
+On new topics, refresh has only a fragile lead at a budget of two.
+Neither refresh nor push clearly wins at four, and push wins at eight.
+
+Refresh raises a second question: which shards should refresh?
+Our sample-query probe, one of five refresh rules, uses practice queries to estimate which fresh summaries would help most.
+With eight shards on new topics, it clearly lost to most-changed at budgets of four and eight.
+The probe's own messages cost it one summary, but most-changed's small score messages were free.
+So we ran a follow-up in which most-changed pays for them, chosen after seeing the main results and so exploratory.
+It removed the fragile lead over push.
+It also showed that at budgets of four and eight, the probe lost mostly by picking worse shards.
+On average, counting each shard's new passages predicted the value of a fresh summary better than the probe did.
+We did not try that count as a refresh rule.

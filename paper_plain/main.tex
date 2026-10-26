@@ -1,0 +1,65 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage[T1]{fontenc}
+\usepackage{newtxtext}
+\usepackage{amsmath}
+\usepackage{newtxmath}
+\usepackage{icomma}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric}
+\usepackage[hyphens]{url}
+\def\UrlBreaks{\do\/\do\.\do\-}
+
+\input{generated/numbers}
+
+\begin{document}
+
+\title{Finding New Data in a Vector Database Split Across Servers: How to Spend a Fixed Network Budget}
+
+\author{\IEEEauthorblockN{Anonymous Authors}}
+
+\maketitle
+
+\begin{abstract}
+A vector database stores passages as number lists, called vectors, and finds those nearest a query.
+We simulate one split into \RNumNumShards{} parts, or shards.
+A central coordinator sends each query to two shards, chosen by short summaries of their data.
+New passages make summaries out of date, so queries can miss new matches.
+Each time step, a fixed network budget pays for fresh summaries (refresh), extra searches, or copies of new passages (push).
+Results depend on where new passages land and whether they bring new topics or mix known ones.
+If each joins the most similar shard, extra search and push beat refresh at default settings.
+If one shard takes each step's new passages, refresh wins by far on new topics and push on mixed topics.
+If eight shards share them, push wins on mixed topics.
+On new topics, neither refresh nor push wins reliably until the largest budget, where push wins.
+In that setting, refreshing the most-changed shards beat our sample-query probe at budgets of four and eight summaries.
+Results use one data set, without network delays.
+\end{abstract}
+
+\begin{IEEEkeywords}
+vector database, sharding, query routing, out-of-date summaries, network budget, new data
+\end{IEEEkeywords}
+
+\input{sections/intro}
+\input{sections/related}
+\input{sections/system}
+\input{sections/setup}
+\input{sections/results}
+\input{sections/limits}
+\input{sections/conclusion}
+
+\section*{Acknowledgment}
+Gemini (Google) drafted the simulator, analysis code, and number scripts, and an earlier draft of the text.
+Claude (Anthropic) rewrote that draft into this version, wrote the figure code, added scripted number commands, checked each
+citation against its source, and recomputed reported numbers. Gemini, Claude, and Codex (OpenAI) reviewed drafts;
+Codex edited no files. Result numbers come from scripts run on stored run outputs. The authors take responsibility
+for the content.
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}

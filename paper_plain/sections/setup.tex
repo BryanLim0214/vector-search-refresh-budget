@@ -1,0 +1,84 @@
+\section{How We Tested}
+\label{sec:setup}
+
+\subsection{Measuring and Comparing Accuracy}
+\label{sec:stats}
+
+In every time step, an exact search over all stored passages finds each test query's true \RNumPlainTopK{} best matches and when each was added.
+\emph{Recent recall} is the share of a query's true best matches from the current and previous time steps that the system returns.
+Only queries with at least one recent match count toward it: about \RNumPlainQueriesWithRecentPctSteady{} of the mixed-topic queries and \RNumPlainQueriesWithRecentPctNewTopic{} of the new-topic queries.
+\emph{Overall recall} counts all \RNumPlainTopK{} true best matches, old or new.
+We give recall as a percentage and call a difference of one percentage point one \emph{point}.
+
+We run each main setting five times, with seeds numbered \RNumSeedMin{} to \RNumSeedMax{}.
+A seed is a number that fixes a run's random choices, the way a recorded shuffle fixes the order of a deck of cards.
+It sets the arrival order, the clusters, the queries asked, and the shards' search graphs.
+The passages are the same in every run, and all methods see the same queries, so we compare methods query by query.
+
+To compare two methods, we average the difference in recall between them over all queries and seeds.
+Other seeds or queries would give a somewhat different average, so we ask how far it could move by chance.
+Our main test is a \RNumCIPct{} range found by resampling.
+We redraw the five seeds with repeats allowed, like drawing names from a hat and putting each one back.
+Within each drawn seed, we redraw its queries the same way.
+We recompute the average difference for each of \RNumPlainBootReps{} such redraws, and the middle \RNumCIPct{} of these averages is the range.
+If the whole range lies on one side of zero, chance alone would rarely produce the difference, and we call it \emph{clear}.
+Otherwise we say there is no clear difference.
+
+Our simpler test uses only the five seed averages of the difference.
+Their \emph{spread} is their standard deviation, roughly the typical distance of one seed's average from the mean of all five.
+This textbook range is centered on that mean, and its half-width is about \RNumPlainTCritFive{} times the spread divided by the square root of five.
+The large factor allows for having only five numbers.
+The two tests can disagree because resampling also counts how single queries vary, but with only five seeds it understates how much seeds differ.
+So when seeds differ a lot, as in several main eight-shard tests in Table~\ref{tab:main}, our range was \RNumBootNarrowerMin{} to \RNumBootNarrowerMax{} narrower.
+When the five seed averages agree closely, the simpler range shrinks and ours can be wider: \RNumBootWiderMThreeRNMinusQLNewTopic{} wider for the probe against most-searched (Section~\ref{sec:res-which}).
+
+A clear lead is \emph{fragile} if it fails any one of four further checks.
+Its range must not nearly touch zero, and the simpler test must exclude zero.
+No seed may point the other way, and a most-changed lead must survive paying for its score messages (Section~\ref{sec:follow}).
+
+Our ranges treat each asked query as a separate, unrelated sample, although the same \RNumPlainTestQueries{} queries repeat about \RNumQueryRepeatsQTwoHundred{} times per run.
+They also rest on the one sample of passages and queries we drew from the data set.
+Nor are they widened for our many comparisons, which raises the chance that some clear result is a fluke.
+Against other options we use the \emph{best refresh rule}: whichever of the five rules has the highest recent recall in that setting.
+Picking it from the same runs we compare favors refresh a little.
+This makes the alternatives' tests harder to pass under starting-center placement, and refresh's tests slightly easier under eight-shard placement.
+
+\subsection{Our Plan, Written Before the Main Analysis}
+
+Writing tests down before seeing the results keeps researchers from reporting only the tests that happen to look good.
+Before any run, we stored a plan with first settings, message sizes, and three hypotheses, or predictions.
+One was that the probe would beat the other rules by at least \RNumPlainGateThreshold{} points under starting-center placement.
+A small trial run, or pilot, with one seed (\RNumPilotSeed{}) then showed that refresh gained little there, and all three were replaced.
+
+Before the main runs, a code review and a first written change to the plan, called an addendum, revised the design.
+Together they added the new-topic stream, one-shard placement, the three query rates, and an ID number in each pushed passage.
+They also replaced a rule that slowly raised waiting shards' scores with a waiting limit set by the budget.
+The first addendum set five of the tests below.
+Two of them restate pilot results and reuse the pilot's seed, so Section~\ref{sec:res-near} also checks them on the other four seeds.
+Testing our analysis program on a partial set of \RNumPartialMOneTestedRuns{} starting-center runs printed one result, which changed no test or rule.
+A second addendum came when \RNumPlainAddTwoRunsDone{} of the \RNumPlainAddTwoRunsTotal{} one-shard runs had finished, before anyone looked at them and before any eight-shard run.
+It added eight-shard placement, live extra search, and the remaining tests, which is why one-shard runs have only planned extra search.
+
+We call the tests in the plan registered tests; a test that one method beats another passes only if the whole range is above zero.
+Under starting-center placement, we tested that refresh all gains less than \RNumPlainGateThreshold{} points on average over never refresh.
+We also tested that planned extra search, live extra search, and push each beat the best refresh rule.
+Under one-shard placement, we predicted that all five refresh rules match refresh all exactly.
+We also tested that refresh beats extra search and push at every budget.
+The probe test asked whether the probe beats each other rule by at least \RNumPlainGateThreshold{} points on average, with the whole range above zero.
+It ran only if refresh all first gained at least \RNumPlainGateThreshold{} points on average, which we call the \RNumPlainGateThreshold{}-point threshold.
+Under one-shard placement, the predicted tie meant that this test could not pass.
+Eight-shard placement repeats these tests with live extra search.
+It adds a prediction that the four rules other than the probe match refresh all at a budget of eight.
+
+After reading all the main results, we wrote down a follow-up and stored it before running it.
+In it, most-changed pays for its score bytes, so it refreshes as many summaries as the probe; we call this version paying most-changed.
+Of its \RNumAddThreeTotalRuns{} simulations, \RNumAddThreeMThreeRuns{} used eight-shard placement.
+Another \RNumAddThreeMOneRuns{} used starting-center placement at \RNumPlainQueriesHigh{} queries per step.
+The last \RNumAddThreeRepRuns{} were reruns with the charge turned off, and they matched the stored main runs on every query.
+Because we chose the follow-up after seeing the results, it is exploratory and has no pass or fail tests.
+It has \RNumAddThreeTotalIntervals{} ranges, one for each of \RNumAddThreeCompRows{} comparisons on recent and on overall recall, not widened for many comparisons.
+Table~\ref{tab:main} shows the eight-shard ones against the probe, push, and live extra search, on recent recall.
+
+The main experiments have \RNumTotalMainRuns{} runs, with none missing, and every run stayed within its budget for the costs we charge.
+Runs that ran out of memory were rerun from the same code.
+They include some starting-center runs, two eight-shard runs, and \RNumAddThreeMThreeFailedAttempts{} of the \RNumAddThreeMThreeRuns{} eight-shard follow-up runs.
