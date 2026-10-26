@@ -29,4 +29,5 @@ deck.order.forEach((id, i) => {
 });
 
 fs.writeFileSync(path.join(OUT_DIR, "speaker_script.md"), script, "utf8");
-pres.writeFile({ fileName: path.join(OUT_DIR, "midterm_progress.pptx") }).then((f) => console.log("wrote", f));
+// The animated deck, midterm_progress.pptx, comes from build_pptx_animated.ps1; this one has pictures only.
+pres.writeFile({ fileName: path.join(OUT_DIR, "midterm_progress_pictures_only.pptx") }).then((f) => console.log("wrote", f));

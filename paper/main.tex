@@ -16,6 +16,7 @@
 \ifdefined\forceanonymous \anonymoustrue \fi
 
 \begin{document}
+\bstctlcite{IEEEexample:BSTcontrol}
 \setlength{\textfloatsep}{2pt plus 1pt minus 1pt}
 \setlength{\floatsep}{2pt plus 1pt minus 1pt}
 \setlength{\dbltextfloatsep}{2pt plus 1pt minus 1pt}
@@ -30,7 +31,7 @@
 \author{\IEEEauthorblockN{Anonymous Authors}}
 \else
 \author{\IEEEauthorblockN{Panhapiseth Lim}
-\IEEEauthorblockA{Department of Computer Science, University of Texas Permian Basin, Odessa, Texas, USA\\lim\_p65274@utpb.edu}}
+\IEEEauthorblockA{Department of Computer Science\\University of Texas Permian Basin\\Odessa, Texas, USA\\lim\_p65274@utpb.edu}}
 \fi
 
 \maketitle
@@ -53,6 +54,6 @@ text in every section. Gemini, Claude, and Codex (OpenAI) reviewed drafts; Codex
 come from scripts run on stored run outputs. \ifanonymous The authors take\else The author takes\fi{} responsibility for the content.
 
 \bibliographystyle{IEEEtran}
-\bibliography{refs}
+\bibliography{bstctl,refs}
 
 \end{document}
