@@ -99,6 +99,7 @@ The best choice depends on where new passages are stored.
 | `paper/` | The full paper: LaTeX sources, the number and figure scripts, and the built `main.pdf`. |
 | `paper_plain/` | The short plain-English paper: LaTeX sources, its figure script, and the built `main.pdf`. |
 | `presentation/` | The 15-slide midterm presentation as a PowerPoint file, its speaker script, slide images and slide sources; `presentation/README.md` explains each file. |
+| `demo/` | A live view of the simulator in the browser: six methods run side by side, one time step at a time; `demo/README.md` explains how to start it. |
 | `audit/` | Five selected review reports; `audit/README.md` explains each one. |
 | `run_addendum2.cmd` | The original Addendum 2 launcher, kept as a record. It uses the author's local paths. |
 | `requirements.lock.txt` | Exact package versions. |
