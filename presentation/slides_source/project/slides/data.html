@@ -27,8 +27,8 @@ if(calm)draw(2.1);else requestAnimationFrame(fr);
 <p style="position:absolute; top:676px; left:128px; width:900px; font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#44535c">Blocks are shards. Shaded blocks receive the orange new passages.</p>
 <div style="position:absolute; top:330px; left:1068px; width:724px; display:flex; flex-direction:column; gap:16px">
 <p style="font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#13212a">Data: 100,000 web passages and 1,000 real search questions from MS MARCO, a public data set. A small language model turns each into 384 numbers that capture its meaning.</p>
-<p style="font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#44535c">Placement: starting center (each passage goes to the shard with the closest starting center), one shard (all of a step’s passages on one shard), or eight shards (the closest of eight active shards, so some get more).</p>
-<p style="font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#44535c">Topics: mixed (random order) or new (held back at the start). Budgets of 2, 4 or 8&#160;summaries; 50, 200 or 800 questions per step; five repeats with different random starts, called seeds.</p>
+<p style="font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#44535c">Placement: starting center (each passage goes to the shard whose center at the start is closest), one shard (all of a step’s passages on one shard), or eight shards (the closest of eight active shards, so some get more).</p>
+<p style="font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#44535c">Topics: mixed (random order) or new (held back at the start). Budgets of 2, 4 or 8&#160;summaries; 50, 200 or 800 questions per step. Each setting is repeated five times with different random starts.</p>
 </div>
 <div style="position:absolute; top:736px; left:128px; width:1664px; display:flex; flex-direction:row; gap:32px">
 <div style="display:flex; flex-direction:column; gap:8px; flex:1; padding:22px 28px; background:#f8faf8; border:1px solid #d3dbd8; border-radius:16px">
@@ -37,12 +37,12 @@ if(calm)draw(2.1);else requestAnimationFrame(fr);
 </div>
 <div style="display:flex; flex-direction:column; gap:8px; flex:1; padding:22px 28px; background:#f8faf8; border:1px solid #d3dbd8; border-radius:16px">
 <p style="font-family:'IBM Plex Mono', 'Courier New', monospace; font-size:24px; letter-spacing:2px; text-transform:uppercase; color:#1f6e6a">When a difference counts</p>
-<p style="font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#44535c">We resample questions and seeds many times. If the 95% range of a difference stays on one side of zero, we call it clear.</p>
+<p style="font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#44535c">A difference is clear when our statistics test says chance alone would rarely produce it. One point means one percentage point.</p>
 </div>
 </div>
 <div style="position:absolute; bottom:64px; left:128px; width:1664px; display:flex; flex-direction:row; justify-content:space-between">
-<p style="font-family:'IBM Plex Mono', 'Courier New', monospace; font-size:24px; color:#5c6b73">Data, workloads and measures</p>
-<p style="font-family:'IBM Plex Mono', 'Courier New', monospace; font-size:24px; color:#5c6b73">07 / 15</p>
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace; font-size:24px; color:#5c6b73">Data, test settings and scores</p>
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace; font-size:24px; color:#5c6b73">08 / 15</p>
 </div>
 <aside>About 55 seconds
 
@@ -50,7 +50,5 @@ The data are one hundred thousand passages from MS MARCO, a public set of web pa
 
 The animation shows the three placements we test, meaning where a new passage is stored: on the shard whose starting center is closest, all on one shard per time step, or on whichever of eight active shards has the closest topic, so some of the eight get more than others. New passages come either in mixed topic order or from new topics that were held back at the start.
 
-Our main score is recent recall. Take a question’s ten true best matches, keep the ones that arrived in the last two steps, and ask what share the system found. Overall recall is the same, counting all ten. Every setting is repeated five times with different random starts, called seeds. We resample the questions and seeds many times, and we call a difference clear only when its ninety-five percent range stays on one side of zero. We wrote the plan and the tests down before the main analysis, and the one follow-up we added after seeing results is labeled as exploratory.
-
-This slide covers the metrics, data and workload parts of the rubric.</aside>
+Our main score is recent recall. Take a question’s ten true best matches, keep the ones that arrived in the last two steps, and ask what share the system found. Overall recall is the same, counting all ten. Every setting is repeated five times with different random starts. We call a difference clear only when our statistics test says chance alone would rarely produce it, and we give differences in points, where one point is one percentage point. We wrote the plan and the tests down before the main analysis, and the one follow-up we added after seeing results is clearly labeled as added later.</aside>
 </section>

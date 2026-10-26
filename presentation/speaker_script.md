@@ -6,9 +6,9 @@ One section per slide, in order. Read it aloud as written; times are rough.
 
 *About 30 seconds*
 
-My project asks a practical question about databases that search by meaning. These databases keep their data on many servers, and new data arrives all the time. Keeping the search accurate costs network traffic, and the traffic budget is limited.
+My project asks a practical question about databases that search by meaning. These databases keep their data on many servers, and new data arrives all the time. Keeping the search accurate means sending extra bytes between servers, and the number of bytes is limited.
 
-So the question is simple. If you can only send so many bytes, what should you spend them on? I will show what I built, how I tested it, what I found, and what is left before the conference deadline.
+So if you can only send so many bytes, what should you spend them on? I will show what I built, how I tested it, what I found, and what is left before the conference deadline.
 
 The picture behind me shows the idea. Each cloud of white dots is one server’s data, and the rings are the short summaries the system keeps of each server. Orange dots are new data arriving. The moving teal dot is a question, sent to the two servers whose summaries look closest to it.
 
@@ -20,7 +20,7 @@ First, what is a vector database? It stores passages of text as lists of numbers
 
 Ours keeps one hundred thousand passages on thirty-two servers, which we call shards. To save work, a coordinator, which works like a front desk, sends each question to only two shards. It decides which two by looking at a short summary of every shard: sixteen points that mark the main topics the shard holds.
 
-Here is the problem, in the animation. New passages land on shard three. But the coordinator still has shard three’s old summary, so it sends the question to shards one and two and misses the new match. Once shard three sends a fresh summary, the question goes to shard three and finds it. Fresh summaries help, but each one costs network traffic.
+Here is the problem, in the animation. New passages land on shard three. But the coordinator still has shard three’s old summary, so it sends the question to shards one and two and misses the new match. Once shard three sends a fresh summary, the question goes to shard three and finds it. Fresh summaries help, but each one means more bytes sent over the network.
 
 ## 3. Where should the network bytes go?
 
@@ -36,37 +36,41 @@ The second question is about refreshing itself. If we can only refresh a few sha
 
 *About 45 seconds*
 
-None of the parts of this idea is brand new, and the paper credits each one. Web crawlers already refresh pages under a budget, choosing the pages whose update would most improve search. Work on searching many text collections showed that old summaries hurt, and proposed ways to decide when to update them. Single vector indexes are already kept up to date as their data changes. And a recent system spread over many servers, Semord, asks extra servers when its routing goes wrong, but its central baseline assumes the routing data is always fresh.
+None of the parts of this idea is brand new, and the paper credits each one. A search engine’s page collector, called a web crawler, can choose which new pages to fetch first by how often they would show up in top search results. Work on searching many text collections showed that out-of-date summaries lower accuracy, and earlier work planned updates for the summaries most likely to be out of date. A single search index is already kept up to date as its data changes. And in Semord, a recent system with no central coordinator, servers ask extra servers to make up for questions sent to the wrong ones.
 
 What we add is the combination: a coordinator whose summaries go out of date, a fixed byte budget, and a fair comparison of refreshing, extra searches and pushing at the same number of bytes. We also adapt the crawling idea into a refresh rule that uses sixty-four sample questions, and we test everything in a simulator that checks every answer, with the plan written down before the main analysis.
-
-This slide covers the related-work part of the paper.
 
 ## 5. One simulated time step
 
 *About 50 seconds*
 
-This is the simulator I built, shown as one time step. At the start, about half of the passages are split into thirty-two shards by similarity of meaning, and every shard builds its own fast search structure and its summary.
+This is the simulator I built, shown as one time step. At the start, about half of the passages are split into thirty-two shards by similarity of meaning, and every shard sets up its own fast search and its summary.
 
 Then each of the fifty time steps goes the same way. New passages arrive, about a thousand per step, and a placement rule decides which shard stores each one. A slow, exact search over everything finds the true best answers, so we can grade every answer. Shards that changed prepare a fresh summary but do not send it yet. Then the method spends its byte budget, and every message is counted with its size. Questions are answered from two shards plus whatever extra the method paid for. Finally every answer is graded against the truth, and the run stops if a method overspends.
 
-One honest limit: it all runs on one computer. We count bytes exactly, but we do not model network delay, waiting in line, or failures.
+One limit: it all runs on one computer. We count bytes exactly, but we do not model network delay, waiting in line, or failures.
 
-This slide covers the architecture part of the rubric.
+## 6. What the project is built with
 
-## 6. Twelve methods, one budget
+*About 40 seconds*
+
+These are the tools behind the simulator, in the order the data moves through them. The passages and questions come from MS MARCO, which we download from Hugging Face. A Sentence-Transformers model, run with PyTorch, turns each passage and question into a list of three hundred eighty-four numbers. Faiss groups similar passages into shards and summaries, and it also finds the true best matches we grade against. A library called hnswlib gives each shard its own fast search. The simulator itself is our own Python code, and the results are stored as tables with pandas and PyArrow.
+
+Around the code, Git keeps every change, and the code is public on GitHub, with eight named save points that mark the steps of the plan. pytest runs twenty-four automated tests. Every experiment has its own settings file, and a script restarts only the runs that did not finish. Both papers are written in LaTeX with the IEEE template.
+
+Everything ran on one Windows computer, and each simulation process used about six and a half gigabytes of memory.
+
+## 7. Twelve methods, one budget
 
 *About 50 seconds*
 
-We compare twelve methods. Four are classical refresh baselines. Rotation lets shards take turns. Largest shard and most-searched come from earlier work on searching many text collections. Most-changed asks each shard for a tiny four-byte score that says how badly its old summary fits its new passages, and refreshes the worst first. Keep those tiny scores in mind; they matter later.
+We compare twelve methods. Four are classical refresh rules, which serve as our baselines. Rotation lets shards take turns. Largest shard and most-searched come from earlier work on searching many text collections. Most-changed asks each shard for a tiny four-byte score that says how badly its old summary fits its new passages, and refreshes the worst first. We come back to these tiny scores later.
 
 Our own rule is the sample-query probe. The coordinator sends sixty-four sample questions and counts how many new best matches each fresh summary would bring back. That costs bytes too: at the default budget its messages use about a fifth of the allowance, so it can send one fewer summary.
 
-Three methods spend the bytes another way: a planned extra search that looks at all of a step’s questions first, a fair live version that decides question by question, and push. Finally, reference points show the range. Never refreshing is the starting point, and the others show how much better routing could get without a budget.
+Three methods spend the bytes another way: a planned extra search that looks at all of a step’s questions first, a fair live version that decides question by question, and push. Finally, methods without a budget show the range. Never refreshing is the starting point, and the others show how much better choosing shards could get without a budget.
 
-This slide covers the classical-baseline part of the rubric.
-
-## 7. What arrives, and how we score it
+## 8. What arrives, and how we score it
 
 *About 55 seconds*
 
@@ -74,17 +78,7 @@ The data are one hundred thousand passages from MS MARCO, a public set of web pa
 
 The animation shows the three placements we test, meaning where a new passage is stored: on the shard whose starting center is closest, all on one shard per time step, or on whichever of eight active shards has the closest topic, so some of the eight get more than others. New passages come either in mixed topic order or from new topics that were held back at the start.
 
-Our main score is recent recall. Take a question’s ten true best matches, keep the ones that arrived in the last two steps, and ask what share the system found. Overall recall is the same, counting all ten. Every setting is repeated five times with different random starts, called seeds. We resample the questions and seeds many times, and we call a difference clear only when its ninety-five percent range stays on one side of zero. We wrote the plan and the tests down before the main analysis, and the one follow-up we added after seeing results is labeled as exploratory.
-
-This slide covers the metrics, data and workload parts of the rubric.
-
-## 8. Where new data lands decides.
-
-*About 30 seconds*
-
-Here is the main finding in one sentence: where new data lands decides how to spend the network budget.
-
-When each new passage goes to the shard with the nearest starting center, extra search and push both beat every refresh rule. When one shard takes all of a step’s new passages, fresh summaries win on new topics and push wins on mixed topics. When eight shards share them, push wins on mixed topics; on new topics, refresh has only a fragile lead at the smallest budget, there is no clear winner at the middle one, and push wins at the largest. The next three slides show each case.
+Our main score is recent recall. Take a question’s ten true best matches, keep the ones that arrived in the last two steps, and ask what share the system found. Overall recall is the same, counting all ten. Every setting is repeated five times with different random starts. We call a difference clear only when our statistics test says chance alone would rarely produce it, and we give differences in points, where one point is one percentage point. We wrote the plan and the tests down before the main analysis, and the one follow-up we added after seeing results is clearly labeled as added later.
 
 ## 9. Here, extra search and push win
 
@@ -114,7 +108,7 @@ One more detail: here all five refresh rules tie, because they all refresh the o
 
 Third case: eight shards share each time step’s new passages. This is the hardest case, and here the size of the budget decides. The dashed line is never refreshing.
 
-On new topics, compare the teal and orange bars. With the smallest budget, refreshing is ahead of push by about one and a half points. But that lead is fragile. The most-changed rule needs each shard to send a tiny four-byte score, and in our main runs those bytes were free. The budget buys whole summaries, so when we charged for those scores, the rule could afford only one summary instead of two, and the lead disappeared. With a budget of four there is no clear winner, and with a budget of eight push wins by about three and a half points.
+On new topics, compare the teal and orange bars. With the smallest budget, refreshing is ahead of push by about one and a half points. But that lead is fragile. The most-changed rule needs each shard to send a tiny four-byte score, and in our main runs those bytes were not charged to the budget. The budget buys whole summaries, so when we charged for those scores, the rule could afford only one summary instead of two, and the lead disappeared. With a budget of four there is no clear winner, and with a budget of eight push wins by about three and a half points.
 
 On mixed topics, push wins at every budget for finding new matches. If you count older matches too, live extra search does even better than push.
 
@@ -122,11 +116,11 @@ On mixed topics, push wins at every budget for finding new matches. If you count
 
 *About 55 seconds*
 
-Now our own rule, and I want to be clear: it lost. In the eight-shard setting on new topics, with a budget of four, the simple most-changed rule found about thirty-one percent of new matches and our probe about twenty-eight. Our plan said the probe had to win by at least five points; instead it lost by three point six.
+Now our own rule. It lost. In the eight-shard setting on new topics, with a budget of four, the simple most-changed rule found about thirty-one percent of new matches and our probe about twenty-eight. Our plan said the probe had to win by at least five points; instead it lost by three point six.
 
-Where did the gap come from? A small part, about one point, is the probe’s own messages: they cost about a fifth of the budget, so it sends one fewer summary. The bigger part, about two and two-thirds points, stays even when both rules send the same number of summaries, so it comes from picking worse shards. In sixty-two of two hundred fifty time steps, the probe’s estimate was zero for every shard, so it had nothing to rank by.
+Where did the gap come from? A small part, about one point, is the probe’s own messages: they cost about a fifth of the budget, so it sends one fewer summary. The bigger part, about two and two-thirds points, stays even when both rules send the same number of summaries, so it comes from picking worse shards. In sixty-two of two hundred fifty time steps, the probe’s estimate was zero for every shard, so it could not tell the shards apart.
 
-The bars at the bottom show how well each signal ranks shards by their real benefit. A plain count of new passages per shard did much better than the probe, although we did not test that count as a refresh rule.
+The bars at the bottom show how well each estimate predicts which shards gain most from a refresh. A plain count of new passages per shard did much better than the probe, although we did not test that count as a refresh rule.
 
 ## 13. What surprised us, and what we fixed
 
@@ -134,26 +128,26 @@ The bars at the bottom show how well each signal ranks shards by their real bene
 
 These are the checks that changed the project along the way. A trial run showed that refreshing barely helped when new passages join the shard with the nearest starting center, so we added placements where old summaries really fail. A code review found that with one active shard every rule must make the same choice, before we wasted any runs. The planned extra search could see a whole step’s questions in advance, so we added a fair live version; seeing ahead was worth very little. We noticed that the most-changed rule’s tiny score messages were free, and a clearly labeled follow-up charged them. And a chance-level check matched simple math: two shards out of thirty-two.
 
-The road blockers were practical. Each run needed several gigabytes of memory, and the first big batch crashed, so I built a runner that restarts only the unfinished runs and ran fewer jobs at once; later batches still needed a few reruns. An AI drafting tool once typed numbers with no source, so every result number is now generated by scripts and checked. And the first paper was too dense, so there is now a plain-English version.
-
-This slide covers the sanity-check and risk parts of the rubric.
+The road blockers were practical. Each simulation process needed several gigabytes of memory, and the first big batch crashed, so I built a script that restarts only the unfinished runs and ran fewer jobs at once; later batches still needed a few reruns. An AI drafting tool once typed numbers with no source, so every result number is now generated by scripts and checked. And the first paper was too dense, so there is now a plain-English version.
 
 ## 14. Done, and what is left
 
 *About 40 seconds*
 
-Here is where the project stands. All one thousand one hundred fifty-eight simulation runs are finished, with none missing, and all twenty-four automated tests pass. The code is public, with eight tags marking the steps of the plan, so anyone can check that each part of the plan was committed before the runs it covers. There is a full ten-page paper in conference format and an eight-page plain-English version.
+Here is where the project stands. All one thousand one hundred fifty-eight simulation runs are finished, with none missing, and all twenty-four automated tests pass. The code is public, with eight named save points for the steps of the plan, so anyone can check that each part of the plan was saved before the runs it covers. There is a full ten-page paper in conference format and an eight-page plain-English version.
 
 What is left is writing and submission, not experiments. Before the abstract deadline on the twenty-fourth of November, I will finish the final checks, read the whole paper myself, and choose which version to submit. The paper is due on the first of December, and the course presentation follows.
 
-One risk: the paper must be anonymous for review, but the public repository shows my name, so I will check the conference rule on public preprints.
+One risk: the paper must be anonymous for review, but the public repository shows my name, so I will check whether the conference allows the paper to be public online.
 
-This slide covers the paper-status and plan parts of the rubric.
+## 15. References and AI use
 
-## 15. Questions?
+*About 45 seconds*
 
-*About 30 seconds*
+To finish, where new data lands decides how a vector database should spend a fixed network budget. The simple most-changed rule beat our own probe, and in one setting a few uncharged bytes were enough to create a lead for refresh.
 
-To sum up. Where new data lands decides how a vector database should spend a fixed network budget: on fresh summaries, extra searches, or pushed copies. The simple most-changed rule beat our more expensive probe. And every byte counts, because a few free bytes can change the winner when the budget buys whole summaries.
+These are the works I mentioned, and both papers give the full references. The numbers in brackets match the numbers on the earlier slides.
 
-The code, the results and both versions of the paper are public on GitHub, at the address and code on screen, and every reported result number can be regenerated from the stored runs. Thank you, and I am happy to take questions.
+About AI use. Gemini drafted the simulator code, the analysis code and an early draft of the paper. Claude rewrote the plain-English paper, checked each citation against its source, recomputed the reported numbers and built these slides. Gemini, Claude and Codex also reviewed drafts. Every result number comes from scripts run on the saved results, and I am responsible for the content.
+
+The code, the results and both papers are on GitHub at the address at the bottom. Thank you. I am happy to take questions.

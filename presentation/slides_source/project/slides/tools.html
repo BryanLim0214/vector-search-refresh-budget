@@ -1,0 +1,55 @@
+<section id="tools" data-transition="fade" style="background:#EEF1EE;color:#13212A;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:30px">
+<div style="display:flex;flex-direction:column;gap:16px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#8A5205">Tools and technology</p>
+<h2 style="font-family:'Space Grotesk', Arial, sans-serif;font-size:72px;font-weight:600;line-height:1.1;letter-spacing:-1px;color:#13212A">What the project is built with</h2>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:20px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#F8FAF8;padding:24px;border:1px solid #D3DBD8;border-top:6px solid #E9A23B;border-radius:12px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#8A5205">1 · Data</p>
+<p style="font-size:24px;line-height:1.35;color:#13212A">MS MARCO passages and questions, downloaded from Hugging Face.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#F8FAF8;padding:24px;border:1px solid #D3DBD8;border-top:6px solid #E9A23B;border-radius:12px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#8A5205">2 · Meaning</p>
+<p style="font-size:24px;line-height:1.35;color:#13212A">Sentence-Transformers, run with PyTorch, turns each text into 384 numbers.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#F8FAF8;padding:24px;border:1px solid #D3DBD8;border-top:6px solid #2C8C87;border-radius:12px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#1F6E6A">3 · Grouping</p>
+<p style="font-size:24px;line-height:1.35;color:#13212A">Faiss groups similar passages into shards and summaries, and finds the true best matches.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#F8FAF8;padding:24px;border:1px solid #D3DBD8;border-top:6px solid #2C8C87;border-radius:12px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#1F6E6A">4 · Shard search</p>
+<p style="font-size:24px;line-height:1.35;color:#13212A">hnswlib gives each shard its own fast search.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#F8FAF8;padding:24px;border:1px solid #D3DBD8;border-top:6px solid #3D5563;border-radius:12px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#3D5563">5 · Simulator</p>
+<p style="font-size:24px;line-height:1.35;color:#13212A">Our own Python code with NumPy. pandas and PyArrow store the results.</p>
+</div>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:20px">
+<div style="display:flex;flex-direction:column;gap:8px;padding:20px 0px;border-top:1px solid #C9D2CF">
+<p style="font-size:26px;font-weight:600;color:#13212A">Code history</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C">Git keeps every change, and the code is public on GitHub. Eight named save points mark the steps of the plan.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;padding:20px 0px;border-top:1px solid #C9D2CF">
+<p style="font-size:26px;font-weight:600;color:#13212A">Testing</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C">pytest runs 24 automated tests on the simulator and the analysis.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;padding:20px 0px;border-top:1px solid #C9D2CF">
+<p style="font-size:26px;font-weight:600;color:#13212A">Settings and reruns</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C">Each experiment has one settings file. A script restarts only the runs that did not finish.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;padding:20px 0px;border-top:1px solid #C9D2CF">
+<p style="font-size:26px;font-weight:600;color:#13212A">Writing</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C">LaTeX with the IEEE template for both papers. matplotlib draws the charts.</p>
+</div>
+</div>
+<p style="font-size:26px;line-height:1.4;color:#13212A">Hardware: one Windows 10 computer with Python 3.12. Each simulation process used about 6.5&#160;GB of memory.</p>
+<div style="position:absolute;left:128px;bottom:64px;width:1664px;display:flex;justify-content:space-between"><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">Tools, code and version control</p><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">06 / 15</p></div>
+<aside>About 40 seconds
+
+These are the tools behind the simulator, in the order the data moves through them. The passages and questions come from MS MARCO, which we download from Hugging Face. A Sentence-Transformers model, run with PyTorch, turns each passage and question into a list of three hundred eighty-four numbers. Faiss groups similar passages into shards and summaries, and it also finds the true best matches we grade against. A library called hnswlib gives each shard its own fast search. The simulator itself is our own Python code, and the results are stored as tables with pandas and PyArrow.
+
+Around the code, Git keeps every change, and the code is public on GitHub, with eight named save points that mark the steps of the plan. pytest runs twenty-four automated tests. Every experiment has its own settings file, and a script restarts only the runs that did not finish. Both papers are written in LaTeX with the IEEE template.
+
+Everything ran on one Windows computer, and each simulation process used about six and a half gigabytes of memory.</aside>
+</section>

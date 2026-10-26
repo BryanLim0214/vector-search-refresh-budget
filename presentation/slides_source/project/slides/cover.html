@@ -30,7 +30,8 @@ requestAnimationFrame(frame)})();
 <p style="position:absolute;left:128px;top:128px;width:1664px;font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#B6C4C9">COSC-6315 Distributed Database Systems · Midterm progress · Oct 2026</p>
 <h1 style="position:absolute;left:128px;top:220px;width:1000px;font-family:'Space Grotesk', Arial, sans-serif;font-size:120px;font-weight:600;line-height:1.05;letter-spacing:-2px;color:#EEF1EE">Finding new data in a vector database split across servers</h1>
 <p style="position:absolute;left:128px;top:770px;width:900px;font-size:32px;line-height:1.35;color:#B6C4C9">How to spend a fixed network budget when new passages keep arriving</p>
-<p style="position:absolute;left:128px;bottom:64px;width:700px;font-size:32px;color:#EEF1EE">Panhapiseth Lim</p>
+<p style="position:absolute;left:128px;bottom:106px;width:900px;font-size:32px;color:#EEF1EE">Panhapiseth Lim</p>
+<p style="position:absolute;left:128px;bottom:64px;width:1000px;font-size:24px;color:#B6C4C9">Department of Computer Science, University of Texas Permian Basin</p>
 <div style="position:absolute;left:1180px;top:986px;width:14px;height:14px;background:#EEF1EE;border-radius:7px"></div>
 <p style="position:absolute;left:1204px;top:976px;width:150px;font-size:24px;color:#B6C4C9">Shard data</p>
 <div style="position:absolute;left:1360px;top:984px;width:16px;height:16px;border:2px solid #B6C4C9;border-radius:9px"></div>
@@ -41,9 +42,9 @@ requestAnimationFrame(frame)})();
 <p style="position:absolute;left:1684px;top:976px;width:110px;font-size:24px;color:#B6C4C9">Question</p>
 <aside>About 30 seconds
 
-My project asks a practical question about databases that search by meaning. These databases keep their data on many servers, and new data arrives all the time. Keeping the search accurate costs network traffic, and the traffic budget is limited.
+My project asks a practical question about databases that search by meaning. These databases keep their data on many servers, and new data arrives all the time. Keeping the search accurate means sending extra bytes between servers, and the number of bytes is limited.
 
-So the question is simple. If you can only send so many bytes, what should you spend them on? I will show what I built, how I tested it, what I found, and what is left before the conference deadline.
+So if you can only send so many bytes, what should you spend them on? I will show what I built, how I tested it, what I found, and what is left before the conference deadline.
 
 The picture behind me shows the idea. Each cloud of white dots is one server’s data, and the rings are the short summaries the system keeps of each server. Orange dots are new data arriving. The moving teal dot is a question, sent to the two servers whose summaries look closest to it.</aside>
 </section>

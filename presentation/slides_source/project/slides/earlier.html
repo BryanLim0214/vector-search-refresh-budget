@@ -7,19 +7,19 @@
 <div style="flex:1;display:flex;flex-direction:column;border-bottom:1px solid #C9D2CF">
 <div style="display:flex;flex-direction:column;gap:6px;padding:12px 0px;border-top:1px solid #C9D2CF">
 <p style="font-size:28px;font-weight:600;color:#13212A">Refreshing under a budget</p>
-<p style="font-size:26px;line-height:1.35;color:#44535C">Web crawlers refresh the stored pages whose update would most improve search (Pandey and Olston).</p>
+<p style="font-size:26px;line-height:1.35;color:#44535C">A search engine’s page collector can first fetch the new pages that would show up most often in top results [1].</p>
 </div>
 <div style="display:flex;flex-direction:column;gap:6px;padding:12px 0px;border-top:1px solid #C9D2CF">
 <p style="font-size:28px;font-weight:600;color:#13212A">Out-of-date summaries</p>
-<p style="font-size:26px;line-height:1.35;color:#44535C">Old summaries hurt search across many collections (Shokouhi et al.), so Ipeirotis et al. update them when they have likely changed.</p>
+<p style="font-size:26px;line-height:1.35;color:#44535C">Out-of-date summaries lower search accuracy across many text collections [2]. Ipeirotis et al. plan updates for the summaries most likely to be out of date [3].</p>
 </div>
 <div style="display:flex;flex-direction:column;gap:6px;padding:12px 0px;border-top:1px solid #C9D2CF">
-<p style="font-size:28px;font-weight:600;color:#13212A">Keeping one vector index current</p>
-<p style="font-size:26px;line-height:1.35;color:#44535C">Systems such as SPFresh and Quake keep a single vector index accurate as its data changes.</p>
+<p style="font-size:28px;font-weight:600;color:#13212A">Keeping one search index current</p>
+<p style="font-size:26px;line-height:1.35;color:#44535C">Systems such as SPFresh and Quake keep one search index accurate as its data changes [4, 5].</p>
 </div>
 <div style="display:flex;flex-direction:column;gap:6px;padding:12px 0px;border-top:1px solid #C9D2CF">
 <p style="font-size:28px;font-weight:600;color:#13212A">Search spread over many servers</p>
-<p style="font-size:26px;line-height:1.35;color:#44535C">Semord asks extra servers when routing goes wrong; its central baseline assumes routing data is always fresh.</p>
+<p style="font-size:26px;line-height:1.35;color:#44535C">In Semord, servers work as equals with no central coordinator. They ask extra servers to make up for questions sent to the wrong ones [6].</p>
 </div>
 </div>
 <div style="flex:1;display:flex;flex-direction:column;gap:22px">
@@ -29,12 +29,10 @@
 <p style="font-size:28px;line-height:1.4;color:#44535C">A simulator that counts the bytes of every message and checks every answer against the true best matches, with the plan written down before the main analysis.</p>
 </div>
 </div>
-<div style="position:absolute;left:128px;bottom:64px;width:1664px;display:flex;justify-content:space-between"><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">Full citations in the paper, Section II</p><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">04 / 15</p></div>
+<div style="position:absolute;left:128px;bottom:64px;width:1664px;display:flex;justify-content:space-between"><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">Numbers in brackets match the references on the last slide</p><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">04 / 15</p></div>
 <aside>About 45 seconds
 
-None of the parts of this idea is brand new, and the paper credits each one. Web crawlers already refresh pages under a budget, choosing the pages whose update would most improve search. Work on searching many text collections showed that old summaries hurt, and proposed ways to decide when to update them. Single vector indexes are already kept up to date as their data changes. And a recent system spread over many servers, Semord, asks extra servers when its routing goes wrong, but its central baseline assumes the routing data is always fresh.
+None of the parts of this idea is brand new, and the paper credits each one. A search engine’s page collector, called a web crawler, can choose which new pages to fetch first by how often they would show up in top search results. Work on searching many text collections showed that out-of-date summaries lower accuracy, and earlier work planned updates for the summaries most likely to be out of date. A single search index is already kept up to date as its data changes. And in Semord, a recent system with no central coordinator, servers ask extra servers to make up for questions sent to the wrong ones.
 
-What we add is the combination: a coordinator whose summaries go out of date, a fixed byte budget, and a fair comparison of refreshing, extra searches and pushing at the same number of bytes. We also adapt the crawling idea into a refresh rule that uses sixty-four sample questions, and we test everything in a simulator that checks every answer, with the plan written down before the main analysis.
-
-This slide covers the related-work part of the paper.</aside>
+What we add is the combination: a coordinator whose summaries go out of date, a fixed byte budget, and a fair comparison of refreshing, extra searches and pushing at the same number of bytes. We also adapt the crawling idea into a refresh rule that uses sixty-four sample questions, and we test everything in a simulator that checks every answer, with the plan written down before the main analysis.</aside>
 </section>

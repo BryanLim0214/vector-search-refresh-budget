@@ -10,22 +10,22 @@
 <svg aria-label="Stacked bar: of the 3.60-point gap, 2.66 points come from picking worse shards and 0.94 points from sending one fewer summary." viewBox="0 0 860 56" width="860" height="56" style="position:absolute;left:128px;top:540px;width:860px;height:56px"><rect x="0" y="0" width="635" height="56" fill="#1F6E6A"/><rect x="635" y="0" width="225" height="56" fill="#E9A23B"/></svg>
 <p style="position:absolute;left:128px;top:606px;width:520px;font-size:24px;color:#13212A">2.66 · picking worse shards</p>
 <p style="position:absolute;left:668px;top:606px;width:320px;font-size:24px;text-align:right;color:#13212A">0.94 · one fewer summary</p>
-<p style="position:absolute;left:128px;top:680px;width:900px;font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#44535C">How well each signal ranks shards by real benefit</p>
+<p style="position:absolute;left:128px;top:680px;width:900px;font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#44535C">How well each estimate predicts which shards gain most</p>
 <svg aria-label="Two bars of rank agreement with the true benefit: a plain count of new passages per shard, 0.63; the sample-query probe, 0.26." viewBox="0 0 860 110" width="860" height="110" style="position:absolute;left:128px;top:720px;width:860px;height:110px"><rect x="0" y="0" width="441" height="44" fill="#6E8796"/><rect x="0" y="62" width="182" height="44" fill="#7A5C99"/></svg>
 <p style="position:absolute;left:585px;top:724px;width:440px;font-size:24px;color:#13212A">0.63 · count of new passages</p>
 <p style="position:absolute;left:326px;top:786px;width:440px;font-size:24px;color:#13212A">0.26 · sample-query probe</p>
 <div style="position:absolute;left:1110px;top:330px;width:682px;display:flex;flex-direction:column;gap:22px">
-<p style="font-size:26px;line-height:1.4;color:#13212A">Our plan said the probe had to beat the other rules by at least 5&#160;points. Instead it lost by 3.60&#160;points (95% range −4.93 to −2.26).</p>
+<p style="font-size:26px;line-height:1.4;color:#13212A">Our plan said the probe had to beat the other rules by at least 5&#160;points. Instead it lost by 3.60&#160;points, a clear difference.</p>
 <p style="font-size:26px;line-height:1.4;color:#44535C">Its own messages use 22% of the budget, so it sends one fewer summary. That accounts for 0.94&#160;points.</p>
-<p style="font-size:26px;line-height:1.4;color:#44535C">The other 2.66&#160;points remain even when both rules send the same number of summaries, so they come from picking worse shards. Its estimate was zero for every shard in 62 of 250 time steps (5 seeds × 50 steps), leaving it nothing to rank by.</p>
+<p style="font-size:26px;line-height:1.4;color:#44535C">The other 2.66&#160;points remain even when both rules send the same number of summaries, so they come from picking worse shards. Its estimate was zero for every shard in 62 of 250 time steps (5 repeats × 50 steps), so it could not tell the shards apart.</p>
 <p style="font-size:26px;line-height:1.4;color:#44535C">A plain count of new passages per shard tracked the real benefit better. We did not test that count as a refresh rule.</p>
 </div>
-<div style="position:absolute;left:128px;bottom:64px;width:1664px;display:flex;justify-content:space-between"><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">Rank agreement: 1 = same order as the true benefit, 0 = unrelated</p><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">12 / 15</p></div>
+<div style="position:absolute;left:128px;bottom:64px;width:1664px;display:flex;justify-content:space-between"><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">Prediction score: 1 = perfect order, 0 = no better than guessing</p><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">12 / 15</p></div>
 <aside>About 55 seconds
 
-Now our own rule, and I want to be clear: it lost. In the eight-shard setting on new topics, with a budget of four, the simple most-changed rule found about thirty-one percent of new matches and our probe about twenty-eight. Our plan said the probe had to win by at least five points; instead it lost by three point six.
+Now our own rule. It lost. In the eight-shard setting on new topics, with a budget of four, the simple most-changed rule found about thirty-one percent of new matches and our probe about twenty-eight. Our plan said the probe had to win by at least five points; instead it lost by three point six.
 
-Where did the gap come from? A small part, about one point, is the probe’s own messages: they cost about a fifth of the budget, so it sends one fewer summary. The bigger part, about two and two-thirds points, stays even when both rules send the same number of summaries, so it comes from picking worse shards. In sixty-two of two hundred fifty time steps, the probe’s estimate was zero for every shard, so it had nothing to rank by.
+Where did the gap come from? A small part, about one point, is the probe’s own messages: they cost about a fifth of the budget, so it sends one fewer summary. The bigger part, about two and two-thirds points, stays even when both rules send the same number of summaries, so it comes from picking worse shards. In sixty-two of two hundred fifty time steps, the probe’s estimate was zero for every shard, so it could not tell the shards apart.
 
-The bars at the bottom show how well each signal ranks shards by their real benefit. A plain count of new passages per shard did much better than the probe, although we did not test that count as a refresh rule.</aside>
+The bars at the bottom show how well each estimate predicts which shards gain most from a refresh. A plain count of new passages per shard did much better than the probe, although we did not test that count as a refresh rule.</aside>
 </section>
