@@ -1,0 +1,49 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{icomma}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage[hyphens]{url}
+\def\UrlBreaks{\do\/\do\.\do\-}
+
+\input{generated/numbers}
+
+\begin{document}
+\setlength{\textfloatsep}{2pt plus 1pt minus 1pt}
+\setlength{\floatsep}{2pt plus 1pt minus 1pt}
+\setlength{\dbltextfloatsep}{2pt plus 1pt minus 1pt}
+\setlength{\abovecaptionskip}{1pt plus 1pt minus 1pt}
+\setlength{\belowcaptionskip}{0pt}
+\setlength{\aboverulesep}{0.8pt}
+\setlength{\belowrulesep}{0.8pt}
+
+\title{Where to Spend Maintenance Bytes in Sharded Vector Search: Summary Refresh, Extra Shard Searches, or Vector Push}
+
+\author{\IEEEauthorblockN{Anonymous Authors}}
+
+\maketitle
+
+\begin{abstract}
+A coordinator routes queries to $2$ of \RNumNumShards{} shards using \RNumCentersPerSummary{}-center summaries. With $B$ summaries' worth of bytes/epoch, should it refresh summaries, search an extra shard, or push vectors? Recent recall@10 is the returned share of top-$10$ neighbors from the last two epochs; gaps are percentage points (pp) with \RNumCIPct{} CIs. The answer depends on where vectors land. When arrivals join the nearest-centroid shard, full refresh changes recent recall@10 over never-refresh by only \RNumHOneGapSteady{} (random topics) and \RNumHOneGapNewTopic{} (new topics). There, at $B{=}4$, $Q{=}200$ queries/epoch, extra search and vector push beat every refresh rule. With one or eight active shards/epoch, vector push wins on random topics. On new topics, refresh wins with one. With eight, it no longer leads vector push at $B{=}2$ once data-change's score messages are charged, has no clear winner at $B{=}4$, and loses at $B{=}8$. There, at $B{=}4$, a \RNumSampleQueries{}-query recovered-neighbor probe reaches \RNumMThreeRNRecentBFourNewTopic{} recent recall@10 versus \RNumMThreeDCRecentBFourNewTopic{} for data-change. Probing spends \RNumRNOverheadShareBFour{} of $B$ and ranks shards worse than new-vector counts; with scores charged and equal refreshes, data-change leads by \RNumAddThreeXOneRNBFourNewTopic{}. We test \RNumCorpusTotalPassages{} passages at $\approx$\RNumSteadyEpochInsertVecs{} inserts/epoch and omit latency, schedule-aware routing, and some costs.
+\end{abstract}
+
+\input{sections/intro}
+\input{sections/related}
+\input{sections/system}
+\input{sections/setup}
+\input{sections/results}
+\input{sections/conclusion}
+
+\section*{Acknowledgment}
+Gemini (Google) drafted the simulator, analysis code, figure and number scripts, and the text of every section.
+Claude (Anthropic) checked each citation against its source, recomputed reported numbers, and wrote or edited
+text in every section. Gemini, Claude, and Codex (OpenAI) reviewed drafts; Codex edited no files. Result numbers
+come from scripts run on stored run outputs. The authors take responsibility for the content.
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}
