@@ -11,6 +11,9 @@ $env:OPENBLAS_NUM_THREADS = '1'; $env:OMP_NUM_THREADS = '1'; $env:MKL_NUM_THREAD
 & $py scripts\gen_numbers.py *> $env:TEMP\gen_numbers.log
 "gen_numbers exit: $LASTEXITCODE"
 latexmk -pdf -interaction=nonstopmode -quiet main.tex *> $null
+# main.tex shows the author; main_anonymous.tex is the double-blind copy for review.
+latexmk -pdf -interaction=nonstopmode -quiet main_anonymous.tex *> $null
+if ((Get-Content main_anonymous.log -Raw) -match 'Output written on main_anonymous.pdf \((\d+) pages') { "anonymous copy pages: $($Matches[1])" }
 $newest = (Get-ChildItem main.tex, sections\*.tex, generated\*.tex, figures\*.pdf, refs.bib | Measure-Object LastWriteTime -Maximum).Maximum
 "build fresh: " + ((Get-Item main.pdf).LastWriteTime -ge $newest)
 $log = Get-Content main.log -Raw
@@ -28,10 +31,10 @@ $bw = 'novel|robust|leverage|seamless|crucial|delve|notably|furthermore|moreover
 # sources\refs.bib is the local citation ledger; it is not in this repository.
 $ledger = Join-Path $root 'sources\refs.bib'
 if (Test-Path $ledger) { "refs identical: " + ((Get-FileHash refs.bib).Hash -eq (Get-FileHash $ledger).Hash) } else { "refs identical: skipped (no sources\refs.bib)" }
-# Double-blind: commit hashes, links, emails, author or institution names in the paper text or macros.
+# Double-blind: commit hashes, links, emails, author or institution names in the anonymous copy's sources and macros.
 # Author and institution names are not stored here: set $env:DVS_BLIND_NAMES to a regex such as 'Name1|Name2'.
 $names = if ($env:DVS_BLIND_NAMES) { '|' + $env:DVS_BLIND_NAMES } else { '' }
-$blind = $all + "`n" + (Get-Content generated\numbers.tex -Raw)
+$blind = ($all -replace '(?s)\\else\s*\n\\author\{.*?\\fi', '') + "`n" + (Get-Content generated\numbers.tex -Raw)
 "double-blind hits: " + (([regex]::Matches($blind, '(?i)\b[0-9a-f]{7,40}\b(?<!\b\d+\b)|github|gitlab|https?://|\S+@\S+\.\w+|COSC|universit' + $names) | ForEach-Object Value | Sort-Object -Unique) -join ',')
 # Decimal numbers typed outside macros in results/conclusion/abstract (likely hand-typed results).
 foreach ($f in 'sections\results.tex', 'sections\conclusion.tex', 'main.tex', 'sections\setup.tex', 'sections\intro.tex') {

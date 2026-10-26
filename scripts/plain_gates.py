@@ -115,8 +115,14 @@ def count_numbers(s):
 gn = subprocess.run([PYTHON, "scripts/gen_numbers.py"], cwd=ROOT / "paper", env=env, capture_output=True)
 info("gen_numbers", "ran" if gn.returncode == 0 else "failed (raw run folders missing?); committed numbers kept")
 os.chdir(PLAIN)
-subprocess.run([tool("latexmk"), "-pdf", "-interaction=nonstopmode", "-quiet", "main.tex"], env=env,
-               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+# main.tex shows the author; main_anonymous.tex is the double-blind copy for review.
+for job in ("main.tex", "main_anonymous.tex"):
+    subprocess.run([tool("latexmk"), "-pdf", "-interaction=nonstopmode", "-quiet", job], env=env,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+anon_log = PLAIN / "main_anonymous.log"
+m_anon = re.search(r"Output written on main_anonymous\.pdf \((\d+) pages", anon_log.read_text(encoding="latin-1")) if anon_log.exists() else None
+anon_pages = int(m_anon.group(1)) if m_anon else 0
+gate("anonymous copy pages <= %d" % MAX_PAGES, 0 < anon_pages <= MAX_PAGES, str(anon_pages))
 pdf, log = PLAIN / "main.pdf", PLAIN / "main.log"
 sources = [PLAIN / "main.tex", *(PLAIN / "sections").glob("*.tex"), *(PLAIN / "generated").glob("*.tex"),
            *(PLAIN / "figures").glob("*.pdf"), PLAIN / "refs.bib"]
@@ -166,8 +172,14 @@ gate("abstract numbers <= %d" % ABSTRACT_MAX_NUMBERS, abn <= ABSTRACT_MAX_NUMBER
 blind_pat = r"(?i)\b(?!\d+\b)[0-9a-f]{7,40}\b|github|gitlab|https?://(?!doi|arxiv|dx)|\S+@\S+\.\w+|COSC|universit"
 if os.environ.get("DVS_BLIND_NAMES"):
     blind_pat += "|" + os.environ["DVS_BLIND_NAMES"]
-blind = sorted(set(re.findall(blind_pat, body + main_tex)))
-gate("double-blind", not blind, ",".join(blind))
+# The double-blind check reads the anonymous copy and the sources without the named author block.
+anon_pdf = PLAIN / "main_anonymous.pdf"
+anon_txt = subprocess.run([tool("pdftotext"), "-enc", "UTF-8", "-nopgbrk", str(anon_pdf), "-"], env=env,
+                          capture_output=True).stdout.decode("utf-8", "replace") if anon_pdf.exists() else ""
+gate("anonymous copy built", bool(anon_txt.strip()))
+main_tex_blind = re.sub(r"\\else\s*\n\\author\{.*?\\fi", "", main_tex, flags=re.S)
+blind = sorted(set(re.findall(blind_pat, anon_txt.split("References")[0] + main_tex_blind)))
+gate("double-blind (anonymous copy)", not blind, ",".join(blind))
 meta = subprocess.run([tool("pdfinfo"), str(pdf)], env=env, capture_output=True).stdout.decode("utf-8", "replace") if pdf.exists() else ""
 gate("pdf metadata has no author", not re.search(r"(?m)^Author:\s*\S", meta))
 

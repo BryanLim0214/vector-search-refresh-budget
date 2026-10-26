@@ -11,6 +11,10 @@
 
 \input{generated/numbers}
 
+% This file shows the author. main_anonymous.tex builds the double-blind copy for review.
+\newif\ifanonymous
+\ifdefined\forceanonymous \anonymoustrue \fi
+
 \begin{document}
 \setlength{\textfloatsep}{2pt plus 1pt minus 1pt}
 \setlength{\floatsep}{2pt plus 1pt minus 1pt}
@@ -22,7 +26,12 @@
 
 \title{Where to Spend Maintenance Bytes in Sharded Vector Search: Summary Refresh, Extra Shard Searches, or Vector Push}
 
+\ifanonymous
 \author{\IEEEauthorblockN{Anonymous Authors}}
+\else
+\author{\IEEEauthorblockN{Panhapiseth Lim}
+\IEEEauthorblockA{Department of Computer Science, University of Texas Permian Basin, Odessa, Texas, USA\\lim\_p65274@utpb.edu}}
+\fi
 
 \maketitle
 
@@ -41,7 +50,7 @@ A coordinator routes queries to $2$ of \RNumNumShards{} shards using \RNumCenter
 Gemini (Google) drafted the simulator, analysis code, figure and number scripts, and the text of every section.
 Claude (Anthropic) checked each citation against its source, recomputed reported numbers, and wrote or edited
 text in every section. Gemini, Claude, and Codex (OpenAI) reviewed drafts; Codex edited no files. Result numbers
-come from scripts run on stored run outputs. The authors take responsibility for the content.
+come from scripts run on stored run outputs. \ifanonymous The authors take\else The author takes\fi{} responsibility for the content.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}

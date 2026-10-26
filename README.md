@@ -7,7 +7,11 @@ experiments:
 - `paper_plain/main.pdf`: "Finding New Data in a Vector Database Split Across Servers: How to Spend a
   Fixed Network Budget", an 8-page plain-English version written for readers new to the field.
 - `paper/main.pdf`: "Where to Spend Maintenance Bytes in Sharded Vector Search: Summary Refresh, Extra
-  Shard Searches, or Vector Push", the full 10-page version with every test and number.
+  Shard Searches, or Vector Push", the full version with every test and number (10 pages without the
+  author block, 11 with it).
+
+Each folder also has `main_anonymous.pdf`, the same paper without the author's name, for double-blind
+review. It is built from `main_anonymous.tex`, which sets one switch and then reads `main.tex`.
 
 All experiments run in a simulator on one computer. No real network is used; the simulator counts the
 bytes that each network message would take.
@@ -255,6 +259,7 @@ cd paper
 ..\.venv\Scripts\python.exe scripts\gen_numbers.py
 ..\.venv\Scripts\python.exe scripts\gen_figures.py
 latexmk -pdf main.tex
+latexmk -pdf main_anonymous.tex
 ```
 
 Without the raw run folders, `gen_numbers.py` stops with a missing-file error and leaves the committed
@@ -268,11 +273,12 @@ paper. That paper builds the same way from `paper_plain/`; its figure comes from
 .venv\Scripts\python.exe paper_plain\scripts\gen_figures_plain.py
 cd paper_plain
 latexmk -pdf main.tex
+latexmk -pdf main_anonymous.tex
 ```
 
 `scripts\plain_gates.py` builds the short paper and prints its checks: at most 8 pages, no math in the
 abstract, introduction or conclusion, sentence length, numbers per sentence, reading grade level,
-citations and the double-blind check.
+citations and the double-blind check on the anonymous copy.
 
 The short paper renames some methods and settings to plainer words:
 
@@ -291,9 +297,9 @@ The short paper renames some methods and settings to plainer words:
 
 The PDF builds from the committed sources alone. Use TeX Live (the author used TeX Live 2025) and make
 sure its `latexmk` comes first on your PATH; a `latexmk` without Perl, as in some MiKTeX setups, fails
-without a clear message. `scripts\paper_gates.ps1` runs the number script, builds the PDF and prints
-checks: page count, LaTeX errors, banned words, em dashes and typed numbers. Its double-blind check
-reads author and institution names from the environment variable `DVS_BLIND_NAMES` (a regular
+without a clear message. `scripts\paper_gates.ps1` runs the number script, builds both PDFs and prints
+checks: page counts, LaTeX errors, banned words, em dashes and typed numbers. Its double-blind check
+skips the named author block in `main.tex` and reads author and institution names from the environment variable `DVS_BLIND_NAMES` (a regular
 expression such as `Name1|Name2`).
 
 ## Run the tests

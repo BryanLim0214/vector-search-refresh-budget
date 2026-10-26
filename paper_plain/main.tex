@@ -17,11 +17,23 @@
 
 \input{generated/numbers}
 
+% This file shows the author. main_anonymous.tex builds the double-blind copy for review.
+\newif\ifanonymous
+\ifdefined\forceanonymous \anonymoustrue \fi
+
 \begin{document}
+\setlength{\textfloatsep}{6pt plus 2pt minus 2pt}
+\setlength{\floatsep}{6pt plus 2pt minus 2pt}
+\setlength{\dbltextfloatsep}{6pt plus 2pt minus 2pt}
 
 \title{Finding New Data in a Vector Database Split Across Servers: How to Spend a Fixed Network Budget}
 
+\ifanonymous
 \author{\IEEEauthorblockN{Anonymous Authors}}
+\else
+\author{\IEEEauthorblockN{Panhapiseth Lim}
+\IEEEauthorblockA{Department of Computer Science, University of Texas Permian Basin, Odessa, Texas, USA\\lim\_p65274@utpb.edu}}
+\fi
 
 \maketitle
 
@@ -56,7 +68,7 @@ vector database, sharding, query routing, out-of-date summaries, network budget,
 Gemini (Google) drafted the simulator, analysis code, and number scripts, and an earlier draft of the text.
 Claude (Anthropic) rewrote that draft into this version, wrote the figure code, added scripted number commands, checked each
 citation against its source, and recomputed reported numbers. Gemini, Claude, and Codex (OpenAI) reviewed drafts;
-Codex edited no files. Result numbers come from scripts run on stored run outputs. The authors take responsibility
+Codex edited no files. Result numbers come from scripts run on stored run outputs. \ifanonymous The authors take\else The author takes\fi{} responsibility
 for the content.
 
 \bibliographystyle{IEEEtran}
