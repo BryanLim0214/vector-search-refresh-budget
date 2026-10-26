@@ -121,10 +121,12 @@ def build_combined_analysis_root(
 
 
 def main() -> None:
-    repo_prereg2_root = Path(__file__).resolve().parent.parent
-    default_repo_results = repo_prereg2_root.parent / "repo" / "results"
-    default_prereg2_results = repo_prereg2_root / "results"
-    default_analysis_root = repo_prereg2_root.parent / "analysis_root"
+    # Public layout: all runs write to <repository root>/results, and the analysis root is
+    # <repository root>/analysis_root. The local project used two checkouts (repo and repo-prereg2).
+    repo_root = Path(__file__).resolve().parent.parent
+    default_repo_results = repo_root / "results"
+    default_prereg2_results = repo_root / "results"
+    default_analysis_root = repo_root / "analysis_root"
 
     parser = argparse.ArgumentParser(
         description="Build a combined analysis root linking M1/M2/sens from repo and M1_online/M3 from repo-prereg2."
@@ -133,13 +135,13 @@ def main() -> None:
         "--repo-results-root",
         type=Path,
         default=default_repo_results,
-        help="Read-only results root for M1, M2, and sens (default: E:\\DistributedDatabaseProject\\repo\\results).",
+        help="Read-only results root for M1, M2, and sens (default: <repository root>/results).",
     )
     parser.add_argument(
         "--prereg2-results-root",
         type=Path,
         default=default_prereg2_results,
-        help="Read-only results root for M1_online and M3 (default: E:\\DistributedDatabaseProject\\repo-prereg2\\results).",
+        help="Read-only results root for M1_online and M3 (default: <repository root>/results).",
     )
     parser.add_argument(
         "--analysis-root",
@@ -147,7 +149,7 @@ def main() -> None:
         dest="analysis_root",
         type=Path,
         default=default_analysis_root,
-        help="Destination combined analysis root (default: E:\\DistributedDatabaseProject\\analysis_root).",
+        help="Destination combined analysis root (default: <repository root>/analysis_root).",
     )
     parser.add_argument(
         "--mode",
