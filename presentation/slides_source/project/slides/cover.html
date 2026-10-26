@@ -1,0 +1,49 @@
+<section id="cover" data-transition="fade" style="background:#0F1C24;color:#EEF1EE;font-family:'IBM Plex Sans', Arial, sans-serif">
+<x-embed style="position:absolute;left:0px;top:0px;width:1920px;height:1080px"><style>html,body{margin:0;height:100%;overflow:hidden;background:transparent}canvas{display:block;width:100%;height:100%}</style><canvas id="c"></canvas><script>
+(function(){
+var c=document.getElementById('c'),g=c.getContext('2d'),W=0,H=0;
+function rs(){var d=Math.min(2,window.devicePixelRatio||1);W=c.clientWidth||innerWidth;H=c.clientHeight||innerHeight;c.width=W*d;c.height=H*d;g.setTransform(d,0,0,d,0,0)}
+addEventListener('resize',rs);rs();
+var seed=7;function rnd(){seed=seed*16807%2147483647;return seed/2147483647}
+function gauss(){return (rnd()+rnd()+rnd()-1.5)*0.5}
+var K=32,C=[],P=[];
+for(var k=0;k<K;k++){var y=1-2*(k+0.5)/K,r=Math.sqrt(1-y*y),a=k*2.39996;C.push({x:Math.cos(a)*r,y:y*0.8,z:Math.sin(a)*r});
+for(var i=0;i<9;i++)P.push({x:C[k].x+gauss()*0.16,y:C[k].y+gauss()*0.16,z:C[k].z+gauss()*0.16})}
+var NEW=[];for(var n=0;n<60;n++){var kk=Math.floor(rnd()*K);NEW.push({x:C[kk].x+gauss()*0.14,y:C[kk].y+gauss()*0.14,z:C[kk].z+gauss()*0.14,t0:rnd()*10})}
+var calm=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
+var R={};
+function pj(p){var X=p.x*R.ca+p.z*R.sa,Z=-p.x*R.sa+p.z*R.ca,Y=p.y*R.cb-Z*R.sb;Z=p.y*R.sb+Z*R.cb;var s=3/(3+Z);return{X:R.ox+X*s*R.S,Y:R.oy+Y*s*R.S,Z:Z,s:s}}
+function frame(ms){var t=ms/1000+6;g.clearRect(0,0,W,H);
+R.ox=W*0.76;R.oy=H*0.47;R.S=Math.min(W*0.17,H*0.3);var a=t*0.1,b=0.35+Math.sin(t*0.17)*0.07;R.ca=Math.cos(a);R.sa=Math.sin(a);R.cb=Math.cos(b);R.sb=Math.sin(b);
+var q={x:Math.sin(t*0.29)*0.7,y:Math.sin(t*0.37)*0.5,z:Math.cos(t*0.23)*0.7},Q=pj(q);
+var near=C.map(function(cc,i){return[cc.x*q.x+cc.y*q.y+cc.z*q.z,i]}).sort(function(u,v){return v[0]-u[0]}).slice(0,2);
+var pts=P.map(function(p){var o=pj(p);o.col='238,241,238';o.al=0.25+0.5*(1.2-o.Z)/2.4;return o});
+var cyc=t%12;NEW.forEach(function(p){var age=cyc-p.t0;if(age<0)return;var o=pj(p);o.col='240,178,90';o.al=Math.min(1,age*1.5)*(1-Math.max(0,(cyc-11)));o.big=1;pts.push(o)});
+pts.sort(function(u,v){return v.Z-u.Z}).forEach(function(o){var z=(o.big?3.5:2.4)*o.s*1.6;g.fillStyle='rgba('+o.col+','+Math.max(0.12,Math.min(1,o.al))+')';g.beginPath();g.arc(o.X,o.Y,z,0,6.283);g.fill()});
+C.forEach(function(cc,i){var o=pj(cc),hit=near[0][1]===i||near[1][1]===i;g.strokeStyle=hit?'rgba(95,194,186,0.95)':'rgba(182,196,201,'+(0.15+0.25*(1.2-o.Z)/2.4)+')';g.lineWidth=hit?2.5:1.2;g.beginPath();g.arc(o.X,o.Y,(hit?13:9)*o.s,0,6.283);g.stroke()});
+near.forEach(function(e){var o=pj(C[e[1]]);g.strokeStyle='rgba(95,194,186,0.8)';g.lineWidth=2;g.beginPath();g.moveTo(Q.X,Q.Y);g.lineTo(o.X,o.Y);g.stroke()});
+g.fillStyle='#5FC2BA';g.beginPath();g.arc(Q.X,Q.Y,7,0,6.283);g.fill();g.strokeStyle='rgba(95,194,186,0.45)';g.lineWidth=1.5;g.beginPath();g.arc(Q.X,Q.Y,16,0,6.283);g.stroke();
+if(!calm)requestAnimationFrame(frame)}
+requestAnimationFrame(frame)})();
+</script></x-embed>
+<div style="position:absolute;left:0px;top:0px;width:1180px;height:1080px;background:linear-gradient(90deg, #0F1C24 72%, rgba(15,28,36,0))"></div>
+<p style="position:absolute;left:128px;top:128px;width:1664px;font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#B6C4C9">COSC-6315 Distributed Database Systems · Midterm progress · Oct 2026</p>
+<h1 style="position:absolute;left:128px;top:220px;width:1000px;font-family:'Space Grotesk', Arial, sans-serif;font-size:120px;font-weight:600;line-height:1.05;letter-spacing:-2px;color:#EEF1EE">Finding new data in a vector database split across servers</h1>
+<p style="position:absolute;left:128px;top:770px;width:900px;font-size:32px;line-height:1.35;color:#B6C4C9">How to spend a fixed network budget when new passages keep arriving</p>
+<p style="position:absolute;left:128px;bottom:64px;width:700px;font-size:32px;color:#EEF1EE">Panhapiseth Lim</p>
+<div style="position:absolute;left:1180px;top:986px;width:14px;height:14px;background:#EEF1EE;border-radius:7px"></div>
+<p style="position:absolute;left:1204px;top:976px;width:150px;font-size:24px;color:#B6C4C9">Shard data</p>
+<div style="position:absolute;left:1360px;top:984px;width:16px;height:16px;border:2px solid #B6C4C9;border-radius:9px"></div>
+<p style="position:absolute;left:1386px;top:976px;width:120px;font-size:24px;color:#B6C4C9">Summary</p>
+<div style="position:absolute;left:1512px;top:986px;width:14px;height:14px;background:#F0B25A;border-radius:7px"></div>
+<p style="position:absolute;left:1536px;top:976px;width:120px;font-size:24px;color:#B6C4C9">New data</p>
+<div style="position:absolute;left:1660px;top:986px;width:14px;height:14px;background:#5FC2BA;border-radius:7px"></div>
+<p style="position:absolute;left:1684px;top:976px;width:110px;font-size:24px;color:#B6C4C9">Question</p>
+<aside>About 30 seconds
+
+My project asks a practical question about databases that search by meaning. These databases keep their data on many servers, and new data arrives all the time. Keeping the search accurate costs network traffic, and the traffic budget is limited.
+
+So the question is simple. If you can only send so many bytes, what should you spend them on? I will show what I built, how I tested it, what I found, and what is left before the conference deadline.
+
+The picture behind me shows the idea. Each cloud of white dots is one server’s data, and the rings are the short summaries the system keeps of each server. Orange dots are new data arriving. The moving teal dot is a question, sent to the two servers whose summaries look closest to it.</aside>
+</section>

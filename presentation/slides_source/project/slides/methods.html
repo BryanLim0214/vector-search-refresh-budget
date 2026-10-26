@@ -1,0 +1,42 @@
+<section id="methods" data-transition="fade" style="background:#EEF1EE;color:#13212A;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<div style="display:flex;flex-direction:column;gap:16px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#8A5205">Methods compared</p>
+<h2 style="font-family:'Space Grotesk', Arial, sans-serif;font-size:72px;font-weight:600;line-height:1.1;letter-spacing:-1px;color:#13212A">Twelve methods, one budget</h2>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px">
+<div style="display:flex;flex-direction:column;gap:10px;background:#F8FAF8;padding:26px 30px;border:1px solid #D3DBD8;border-radius:16px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6E6A">Classical refresh baselines</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C"><span style="font-weight:600;color:#13212A">Rotation:</span> shards take turns.</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C"><span style="font-weight:600;color:#13212A">Largest shard:</span> the biggest shards go first.</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C"><span style="font-weight:600;color:#13212A">Most-searched:</span> shards that questions visit most go first.</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C"><span style="font-weight:600;color:#13212A">Most-changed:</span> each shard sends a tiny 4-byte score for how badly its old summary fits its new passages; the worst go first.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FCEBD0;padding:26px 30px;border:1px solid #E9C894;border-radius:16px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#8A5205">Our proposed rule</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C"><span style="font-weight:600;color:#13212A">Sample-query probe:</span> the coordinator sends 64 sample questions and counts how many new best matches each fresh summary would bring back. The highest go first.</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C">Its messages use 22% of the budget at the default, which leaves room for one fewer summary.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#F8FAF8;padding:26px 30px;border:1px solid #D3DBD8;border-radius:16px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#1F6E6A">Other ways to spend the bytes</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C"><span style="font-weight:600;color:#13212A">Planned extra search:</span> looks at all of a step’s questions first and gives a third shard to the closest calls.</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C"><span style="font-weight:600;color:#13212A">Live extra search:</span> decides question by question, as they arrive.</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C"><span style="font-weight:600;color:#13212A">Push:</span> copies of new passages go to the coordinator.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#F8FAF8;padding:26px 30px;border:1px solid #D3DBD8;border-radius:16px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;letter-spacing:2px;text-transform:uppercase;color:#5C6B73">Reference points, no budget</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C"><span style="font-weight:600;color:#13212A">Never refresh:</span> keeps the first summaries and spends nothing; the starting point.</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C"><span style="font-weight:600;color:#13212A">Always fresh:</span> all 32 summaries rebuilt every step.</p>
+<p style="font-size:24px;line-height:1.35;color:#44535C"><span style="font-weight:600;color:#13212A">Best-shard and all-shard search:</span> how much better routing could get.</p>
+</div>
+</div>
+<div style="position:absolute;left:128px;bottom:64px;width:1664px;display:flex;justify-content:space-between"><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">Baselines adapted from Shokouhi et al. (2007) and Ipeirotis et al. (2005)</p><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">06 / 15</p></div>
+<aside>About 50 seconds
+
+We compare twelve methods. Four are classical refresh baselines. Rotation lets shards take turns. Largest shard and most-searched come from earlier work on searching many text collections. Most-changed asks each shard for a tiny four-byte score that says how badly its old summary fits its new passages, and refreshes the worst first. Keep those tiny scores in mind; they matter later.
+
+Our own rule is the sample-query probe. The coordinator sends sixty-four sample questions and counts how many new best matches each fresh summary would bring back. That costs bytes too: at the default budget its messages use about a fifth of the allowance, so it can send one fewer summary.
+
+Three methods spend the bytes another way: a planned extra search that looks at all of a step’s questions first, a fair live version that decides question by question, and push. Finally, reference points show the range. Never refreshing is the starting point, and the others show how much better routing could get without a budget.
+
+This slide covers the classical-baseline part of the rubric.</aside>
+</section>

@@ -1,0 +1,40 @@
+<section id="earlier" data-transition="fade" style="background:#EEF1EE;color:#13212A;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:36px">
+<div style="display:flex;flex-direction:column;gap:16px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#8A5205">Earlier work</p>
+<h2 style="font-family:'Space Grotesk', Arial, sans-serif;font-size:72px;font-weight:600;line-height:1.1;letter-spacing:-1px;color:#13212A">What others did, and what we add</h2>
+</div>
+<div style="display:flex;gap:64px">
+<div style="flex:1;display:flex;flex-direction:column;border-bottom:1px solid #C9D2CF">
+<div style="display:flex;flex-direction:column;gap:6px;padding:12px 0px;border-top:1px solid #C9D2CF">
+<p style="font-size:28px;font-weight:600;color:#13212A">Refreshing under a budget</p>
+<p style="font-size:26px;line-height:1.35;color:#44535C">Web crawlers refresh the stored pages whose update would most improve search (Pandey and Olston).</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:6px;padding:12px 0px;border-top:1px solid #C9D2CF">
+<p style="font-size:28px;font-weight:600;color:#13212A">Out-of-date summaries</p>
+<p style="font-size:26px;line-height:1.35;color:#44535C">Old summaries hurt search across many collections (Shokouhi et al.), so Ipeirotis et al. update them when they have likely changed.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:6px;padding:12px 0px;border-top:1px solid #C9D2CF">
+<p style="font-size:28px;font-weight:600;color:#13212A">Keeping one vector index current</p>
+<p style="font-size:26px;line-height:1.35;color:#44535C">Systems such as SPFresh and Quake keep a single vector index accurate as its data changes.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:6px;padding:12px 0px;border-top:1px solid #C9D2CF">
+<p style="font-size:28px;font-weight:600;color:#13212A">Search spread over many servers</p>
+<p style="font-size:26px;line-height:1.35;color:#44535C">Semord asks extra servers when routing goes wrong; its central baseline assumes routing data is always fresh.</p>
+</div>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:22px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#1F6E6A">What this project adds</p>
+<p style="font-size:28px;line-height:1.4;color:#13212A">A coordinator whose summaries go out of date, a fixed byte budget each time step, and refresh, extra search and push compared at equal bytes.</p>
+<p style="font-size:28px;line-height:1.4;color:#44535C">A refresh rule adapted from the crawling work: 64 sample questions estimate how many new best matches a fresh summary would bring back.</p>
+<p style="font-size:28px;line-height:1.4;color:#44535C">A simulator that counts the bytes of every message and checks every answer against the true best matches, with the plan written down before the main analysis.</p>
+</div>
+</div>
+<div style="position:absolute;left:128px;bottom:64px;width:1664px;display:flex;justify-content:space-between"><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">Full citations in the paper, Section II</p><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">04 / 15</p></div>
+<aside>About 45 seconds
+
+None of the parts of this idea is brand new, and the paper credits each one. Web crawlers already refresh pages under a budget, choosing the pages whose update would most improve search. Work on searching many text collections showed that old summaries hurt, and proposed ways to decide when to update them. Single vector indexes are already kept up to date as their data changes. And a recent system spread over many servers, Semord, asks extra servers when its routing goes wrong, but its central baseline assumes the routing data is always fresh.
+
+What we add is the combination: a coordinator whose summaries go out of date, a fixed byte budget, and a fair comparison of refreshing, extra searches and pushing at the same number of bytes. We also adapt the crawling idea into a refresh rule that uses sixty-four sample questions, and we test everything in a simulator that checks every answer, with the plan written down before the main analysis.
+
+This slide covers the related-work part of the paper.</aside>
+</section>

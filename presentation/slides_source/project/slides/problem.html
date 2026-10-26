@@ -1,0 +1,48 @@
+<section id="problem" data-transition="fade" style="background:#EEF1EE;color:#13212A;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:16px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#8A5205">The problem</p>
+<h2 style="font-family:'Space Grotesk', Arial, sans-serif;font-size:72px;font-weight:600;line-height:1.1;letter-spacing:-1px;color:#13212A">Summaries go out of date</h2>
+<div style="position:absolute;left:128px;top:330px;width:820px;height:560px;background:#F8FAF8;border:1px solid #D3DBD8;border-radius:16px"></div>
+<x-embed style="position:absolute;left:128px;top:330px;width:820px;height:560px"><style>html,body{margin:0;height:100%;overflow:hidden;background:transparent}canvas{display:block;width:100%;height:100%}</style><canvas id="c"></canvas><script>
+(function(){
+var c=document.getElementById('c'),g=c.getContext('2d'),F='system-ui,-apple-system,Segoe UI,Arial,sans-serif';
+function rs(){var d=Math.min(2,window.devicePixelRatio||1),w=c.clientWidth||820,h=c.clientHeight||560;c.width=w*d;c.height=h*d;g.setTransform(d*w/820,0,0,d*h/560,0,0)}
+addEventListener('resize',rs);rs();
+var INK='#13212A',TEAL='#1F6E6A',AMB='#E9A23B',RED='#B5442F',LINE='#D3DBD8',OLD='#5C6B73',CHIP='#B9D9D6';
+var calm=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
+function cl(v){return v<0?0:v>1?1:v}function sm(a,b,t){var u=cl((t-a)/(b-a));return u*u*(3-2*u)}
+function txt(s,x,y,col,w,al){g.globalAlpha=al==null?1:al;g.fillStyle=col;g.font=(w||'500')+' 24px '+F;g.textAlign='center';g.textBaseline='middle';g.fillText(s,x,y);g.globalAlpha=1}
+function rr(x,y,w,h,r,fill,stroke,lw){g.beginPath();g.moveTo(x+r,y);g.arcTo(x+w,y,x+w,y+h,r);g.arcTo(x+w,y+h,x,y+h,r);g.arcTo(x,y+h,x,y,r);g.arcTo(x,y,x+w,y,r);g.closePath();if(fill){g.fillStyle=fill;g.fill()}if(stroke){g.strokeStyle=stroke;g.lineWidth=lw||2;g.stroke()}}
+var SY=[40,150,260,370],SX=560,SW=230,SH=90,CX=36,CY=56,CW=250;
+function draw(T){var t=T%12;g.clearRect(0,0,820,560);
+ rr(CX,CY,CW,400,14,'#FFFFFF',LINE,2);txt('Coordinator',CX+CW/2,CY+34,INK,'600');
+ var fresh=sm(7.4,7.8,t)>0.5;
+ for(var k=0;k<4;k++){var y=CY+76+k*78,isOld=k===2;rr(CX+22,y,CW-44,56,10,isOld?(fresh?TEAL:OLD):CHIP,null);
+  txt(isOld?(fresh?'Shard 3: fresh':'Shard 3: old'):'Shard '+(k+1)+' summary',CX+CW/2,y+28,isOld?'#FFFFFF':INK,'500')}
+ for(k=0;k<4;k++){var hot=k===2;rr(SX,SY[k],SW,SH,12,hot?'#FCEBD0':'#FFFFFF',hot?AMB:LINE,hot?3:2);txt('Shard '+(k+1),SX+SW/2,SY[k]+28,INK,'600')}
+ for(var i=0;i<7;i++){var u=sm(0.4+i*0.1,1.2+i*0.1,t);if(u<=0)continue;var tx=SX+26+i*30,x=830+(tx-830)*u;g.fillStyle=AMB;g.beginPath();g.arc(x,SY[2]+62,8,0,6.283);g.fill()}
+ var nl=sm(1.2,1.6,t)*(1-sm(6.4,6.8,t));txt('New passages',423,SY[2]+20,'#8A5205','600',nl);txt('land on shard 3',423,SY[2]+50,'#8A5205','600',nl);
+ var ox=CX+CW,oy=CY+200;
+ function beam(k,t0,t1,al){var u=sm(t0,t1,t);if(u<=0)return;var tx=SX,ty=SY[k]+SH/2;g.globalAlpha=al;g.strokeStyle=TEAL;g.lineWidth=3;g.beginPath();g.moveTo(ox,oy);g.lineTo(ox+(tx-ox)*u,oy+(ty-oy)*u);g.stroke();g.fillStyle=TEAL;g.beginPath();g.arc(ox+(tx-ox)*u,oy+(ty-oy)*u,7,0,6.283);g.fill();g.globalAlpha=1}
+ var a=1-sm(6.6,7.0,t);
+ if(a>0){beam(0,2.0,3.0,a);beam(1,2.0,3.0,a);var miss=sm(3.2,3.6,t)*a;if(miss>0){g.globalAlpha=miss;rr(SX-8,SY[2]-8,SW+16,SH+16,16,null,RED,4);g.globalAlpha=1;txt('The question goes to shards 1 and 2',410,496,INK,'500',miss);txt('and misses the new match on shard 3',410,528,RED,'600',miss)}}
+ var s=sm(7.0,7.6,t)*(1-sm(7.8,8.0,t));if(s>0){var u2=sm(7.0,7.6,t),px=SX+(CX+CW-40-SX)*u2,py=SY[2]+SH/2+(CY+76+2*78+28-SY[2]-SH/2)*u2;g.globalAlpha=s;rr(px-30,py-16,60,32,8,TEAL,null);g.globalAlpha=1}
+ if(t>8.2){var b=1-sm(11.4,12,t);beam(2,8.4,9.3,b);beam(0,8.4,9.3,b);var ok=sm(9.4,9.8,t)*b;if(ok>0){g.globalAlpha=ok;rr(SX-8,SY[2]-8,SW+16,SH+16,16,null,TEAL,4);g.globalAlpha=1;txt('With a fresh summary, the question',410,496,INK,'500',ok);txt('now reaches shard 3 and finds it',410,528,TEAL,'600',ok)}}
+}
+function fr(ms){draw(ms/1000);if(!calm)requestAnimationFrame(fr)}
+if(calm)draw(4.2);else requestAnimationFrame(fr);
+})();
+</script></x-embed>
+<div style="position:absolute;left:1010px;top:330px;width:782px;display:flex;flex-direction:column;gap:24px">
+<p style="font-size:30px;line-height:1.4;color:#13212A">A vector database finds the stored passages that are closest in meaning to a question.</p>
+<p style="font-size:30px;line-height:1.4;color:#44535C">Ours keeps 100,000 passages on 32 servers, called shards. A coordinator, like a front desk, sends each question to only 2&#160;shards. It chooses them from a short summary of each shard: 16 points that mark the main topics the shard holds.</p>
+<p style="font-size:30px;line-height:1.4;color:#44535C">New passages keep arriving, but the coordinator uses each shard’s old summary until the shard sends a fresh one. A question can then miss a good new match.</p>
+</div>
+<div style="position:absolute;left:128px;bottom:64px;width:1664px;display:flex;justify-content:space-between"><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">Animation: one time step, simplified</p><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">02 / 15</p></div>
+<aside>About 50 seconds
+
+First, what is a vector database? It stores passages of text as lists of numbers that capture their meaning. When a question comes in, it finds the stored passages whose meaning is closest.
+
+Ours keeps one hundred thousand passages on thirty-two servers, which we call shards. To save work, a coordinator, which works like a front desk, sends each question to only two shards. It decides which two by looking at a short summary of every shard: sixteen points that mark the main topics the shard holds.
+
+Here is the problem, in the animation. New passages land on shard three. But the coordinator still has shard three’s old summary, so it sends the question to shards one and two and misses the new match. Once shard three sends a fresh summary, the question goes to shard three and finds it. Fresh summaries help, but each one costs network traffic.</aside>
+</section>

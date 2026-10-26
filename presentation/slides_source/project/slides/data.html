@@ -1,0 +1,55 @@
+<section id="data" data-transition="fade" style="display:flex; flex-direction:column; gap:16px; padding:128px 128px 160px; background:#eef1ee">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace; font-size:24px; letter-spacing:3px; text-transform:uppercase; color:#8a5205">Data and measures</p>
+<h2 style="font-family:'Space Grotesk', Arial, sans-serif; font-size:72px; font-weight:600; line-height:1.1; letter-spacing:-1px; color:#13212a">What arrives, and how we score it</h2>
+<div style="position:absolute; top:330px; left:128px; width:900px; height:330px; display:flex; flex-direction:column; background:#f8faf8; border:1px solid #d3dbd8; border-radius:16px"></div>
+<x-embed style="position:absolute; top:330px; left:128px; width:900px; height:330px"><style>html,body{margin:0;height:100%;overflow:hidden;background:transparent}canvas{display:block;width:100%;height:100%}</style><canvas id="c"></canvas><script>
+(function(){
+var c=document.getElementById('c'),g=c.getContext('2d'),F='system-ui,-apple-system,Segoe UI,Arial,sans-serif';
+function rs(){var d=Math.min(2,window.devicePixelRatio||1),w=c.clientWidth||900,h=c.clientHeight||330;c.width=w*d;c.height=h*d;g.setTransform(d*w/900,0,0,d*h/330,0,0)}
+addEventListener('resize',rs);rs();
+var calm=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
+var seed=3;function rnd(){seed=seed*16807%2147483647;return seed/2147483647}
+var TITLES=['By topic','One shard','Eight shards'],AMB='#E9A23B',CELL='#D9E3E1',HOT='#FCEBD0';
+var topicTargets=[];for(var i=0;i<40;i++)topicTargets.push(Math.floor(rnd()*32));
+function tgtOf(p,step,n){return p===0?topicTargets[(step*9+n)%40]:p===1?step%32:((step*8)+(n%8))%32}
+function draw(T){g.clearRect(0,0,900,330);var step=Math.floor(T/2.2),ph=(T%2.2)/2.2;
+ for(var p=0;p<3;p++){var ox=24+p*292,oy=38;g.fillStyle='#13212A';g.font='600 26px '+F;g.textAlign='left';g.textBaseline='alphabetic';g.fillText(TITLES[p],ox,312);
+  var active={};for(var n=0;n<9;n++)active[tgtOf(p,step,n)]=1;
+  for(var k=0;k<32;k++){var cx=ox+(k%8)*32,cy=oy+Math.floor(k/8)*56;g.fillStyle=active[k]?HOT:CELL;g.fillRect(cx,cy,26,46);if(active[k]){g.strokeStyle=AMB;g.lineWidth=2;g.strokeRect(cx,cy,26,46)}}
+  for(n=0;n<9;n++){var tgt=tgtOf(p,step,n),jx=p===1?((n%3)-1)*7:0,jy=p===1?(Math.floor(n/3)-1)*12:(p===2&&n===8?12:0);var cx2=ox+(tgt%8)*32+13+jx,cy2=oy+Math.floor(tgt/8)*56+23+jy;var u=Math.min(1,Math.max(0,ph*1.6-n*0.06));var sx=ox+128,sy=8;var x=sx+(cx2-sx)*u,y=sy+(cy2-sy)*u;if(u<=0)continue;g.fillStyle=AMB;g.beginPath();g.arc(x,y,5,0,6.283);g.fill()}
+ }
+}
+function fr(ms){draw(ms/1000);if(!calm)requestAnimationFrame(fr)}
+if(calm)draw(2.1);else requestAnimationFrame(fr);
+})();
+</script></x-embed>
+<p style="position:absolute; top:676px; left:128px; width:900px; font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#44535c">Blocks are shards. Shaded blocks receive the orange new passages.</p>
+<div style="position:absolute; top:330px; left:1068px; width:724px; display:flex; flex-direction:column; gap:16px">
+<p style="font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#13212a">Data: 100,000 web passages and 1,000 real search questions from MS MARCO, a public data set. A small language model turns each into 384 numbers that capture its meaning.</p>
+<p style="font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#44535c">Placement: by topic (the shard with the closest topic), one shard (all of a step’s passages on one shard), or eight shards (spread over eight).</p>
+<p style="font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#44535c">Topics: mixed (random order) or new (held back at the start). Budgets of 2, 4 or 8&#160;summaries; 50, 200 or 800 questions per step; five repeats with different random starts, called seeds.</p>
+</div>
+<div style="position:absolute; top:736px; left:128px; width:1664px; display:flex; flex-direction:row; gap:32px">
+<div style="display:flex; flex-direction:column; gap:8px; flex:1; padding:22px 28px; background:#f8faf8; border:1px solid #d3dbd8; border-radius:16px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace; font-size:24px; letter-spacing:2px; text-transform:uppercase; color:#1f6e6a">Recent recall, our main score</p>
+<p style="font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#44535c">Of a question’s 10 true best matches from the last two steps, the share the system found. Overall recall counts all 10.</p>
+</div>
+<div style="display:flex; flex-direction:column; gap:8px; flex:1; padding:22px 28px; background:#f8faf8; border:1px solid #d3dbd8; border-radius:16px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace; font-size:24px; letter-spacing:2px; text-transform:uppercase; color:#1f6e6a">When a difference counts</p>
+<p style="font-family:'IBM Plex Sans', Arial, sans-serif; font-size:24px; line-height:1.35; color:#44535c">We resample questions and seeds many times. If the 95% range of a difference stays on one side of zero, we call it clear.</p>
+</div>
+</div>
+<div style="position:absolute; bottom:64px; left:128px; width:1664px; display:flex; flex-direction:row; justify-content:space-between">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace; font-size:24px; color:#5c6b73">Data, workloads and measures</p>
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace; font-size:24px; color:#5c6b73">07 / 15</p>
+</div>
+<aside>About 55 seconds
+
+The data are one hundred thousand passages from MS MARCO, a public set of web passages and real search questions. A small language model turns each passage into a list of three hundred eighty-four numbers that capture its meaning. We use a thousand test questions, and keep sixty-four other questions apart for the probe.
+
+The animation shows the three placements we test, meaning where a new passage is stored: on the shard with the closest topic, all on one shard per time step, or spread over eight shards per time step. New passages come either in mixed topic order or from new topics that were held back at the start.
+
+Our main score is recent recall. Take a question’s ten true best matches, keep the ones that arrived in the last two steps, and ask what share the system found. Overall recall is the same, counting all ten. Every setting is repeated five times with different random starts, called seeds. We resample the questions and seeds many times, and we call a difference clear only when its ninety-five percent range stays on one side of zero. And we wrote the plan and the tests down before the main analysis, so we could not pick the tests after seeing the results.
+
+This slide covers the metrics, data and workload parts of the rubric.</aside>
+</section>

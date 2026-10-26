@@ -1,0 +1,64 @@
+<section id="question" data-transition="fade" style="background:#EEF1EE;color:#13212A;font-family:'IBM Plex Sans', Arial, sans-serif;padding:128px 128px 160px;display:flex;flex-direction:column;gap:16px">
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#8A5205">The question</p>
+<h2 style="font-family:'Space Grotesk', Arial, sans-serif;font-size:72px;font-weight:600;line-height:1.1;letter-spacing:-1px;color:#13212A">Where should the network bytes go?</h2>
+<p style="position:absolute;left:128px;top:292px;width:1640px;font-size:30px;line-height:1.4;color:#44535C">Every budgeted method gets the same allowance each time step: the bytes of 2, 4 or 8&#160;summaries. The default, 4&#160;summaries, is 98,304&#160;bytes.</p>
+<div style="position:absolute;left:128px;top:396px;width:528px;height:450px;display:flex;flex-direction:column;gap:12px;background:#F8FAF8;padding:196px 36px 28px 36px;border:1px solid #D3DBD8;border-radius:16px">
+<h3 style="font-family:'Space Grotesk', Arial, sans-serif;font-size:44px;font-weight:600;line-height:1.1;color:#13212A">Refresh</h3>
+<p style="font-size:26px;line-height:1.35;color:#44535C">A shard sends the coordinator a fresh summary of what it now holds.</p>
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#1F6E6A">24,576&#160;bytes per summary</p>
+</div>
+<div style="position:absolute;left:696px;top:396px;width:528px;height:450px;display:flex;flex-direction:column;gap:12px;background:#F8FAF8;padding:196px 36px 28px 36px;border:1px solid #D3DBD8;border-radius:16px">
+<h3 style="font-family:'Space Grotesk', Arial, sans-serif;font-size:44px;font-weight:600;line-height:1.1;color:#13212A">Extra search</h3>
+<p style="font-size:26px;line-height:1.35;color:#44535C">When the coordinator is unsure, the question also goes to a third shard.</p>
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#1F6E6A">1,656&#160;bytes per extra search</p>
+</div>
+<div style="position:absolute;left:1264px;top:396px;width:528px;height:450px;display:flex;flex-direction:column;gap:12px;background:#F8FAF8;padding:196px 36px 28px 36px;border:1px solid #D3DBD8;border-radius:16px">
+<h3 style="font-family:'Space Grotesk', Arial, sans-serif;font-size:44px;font-weight:600;line-height:1.1;color:#13212A">Push</h3>
+<p style="font-size:26px;line-height:1.35;color:#44535C">Shards send copies of their newest passages, and the coordinator checks them for every question.</p>
+<p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#1F6E6A">1,544&#160;bytes per passage</p>
+</div>
+<x-embed style="position:absolute;left:148px;top:410px;width:488px;height:172px"><style>html,body{margin:0;height:100%;overflow:hidden;background:transparent}canvas{display:block;width:100%;height:100%}</style><canvas id="c"></canvas><script>
+(function(){var c=document.getElementById('c'),g=c.getContext('2d'),F='system-ui,-apple-system,Segoe UI,Arial,sans-serif';
+function rs(){var d=Math.min(2,window.devicePixelRatio||1),w=c.clientWidth||488,h=c.clientHeight||172;c.width=w*d;c.height=h*d;g.setTransform(d*w/488,0,0,d*h/172,0,0)}addEventListener('resize',rs);rs();
+var calm=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;function cl(v){return v<0?0:v>1?1:v}function sm(a,b,t){var u=cl((t-a)/(b-a));return u*u*(3-2*u)}
+function box(x,y,w,h,f,s){g.fillStyle=f;g.fillRect(x,y,w,h);g.strokeStyle=s;g.lineWidth=2;g.strokeRect(x,y,w,h)}function lab(s,x,y,col){g.fillStyle=col;g.font='500 24px '+F;g.textAlign='center';g.textBaseline='middle';g.fillText(s,x,y)}
+function draw(T){var t=T%6;g.clearRect(0,0,488,172);
+box(10,40,150,110,'#FCEBD0','#E9A23B');lab('Shard',85,22,'#13212A');for(var i=0;i<6;i++){g.fillStyle='#E9A23B';g.beginPath();g.arc(36+(i%3)*38,78+Math.floor(i/3)*40,7,0,6.283);g.fill()}
+box(300,40,178,110,'#FFFFFF','#D3DBD8');lab('Coordinator',389,22,'#13212A');var fr=sm(3.2,3.6,t)*(1-sm(5.6,6,t))>0.5;g.fillStyle=fr?'#1F6E6A':'#5C6B73';g.fillRect(320,75,138,40);lab(fr?'fresh':'old',389,95,'#FFFFFF');
+var u=sm(1.0,3.0,t);if(t>0.9&&t<3.3){var x=160+(300-160-60)*u;g.fillStyle='#1F6E6A';g.fillRect(x,78,60,34)}}
+function f(ms){draw(ms/1000);if(!calm)requestAnimationFrame(f)}if(calm)draw(2.6);else requestAnimationFrame(f)})();
+</script></x-embed>
+<x-embed style="position:absolute;left:716px;top:410px;width:488px;height:172px"><style>html,body{margin:0;height:100%;overflow:hidden;background:transparent}canvas{display:block;width:100%;height:100%}</style><canvas id="c"></canvas><script>
+(function(){var c=document.getElementById('c'),g=c.getContext('2d'),F='system-ui,-apple-system,Segoe UI,Arial,sans-serif';
+function rs(){var d=Math.min(2,window.devicePixelRatio||1),w=c.clientWidth||488,h=c.clientHeight||172;c.width=w*d;c.height=h*d;g.setTransform(d*w/488,0,0,d*h/172,0,0)}addEventListener('resize',rs);rs();
+var calm=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;function cl(v){return v<0?0:v>1?1:v}function sm(a,b,t){var u=cl((t-a)/(b-a));return u*u*(3-2*u)}
+function lab(s,x,y,col){g.fillStyle=col;g.font='500 24px '+F;g.textAlign='center';g.textBaseline='middle';g.fillText(s,x,y)}
+var Y=[24,86,148];function draw(T){var t=T%6;g.clearRect(0,0,488,172);
+g.fillStyle='#FFFFFF';g.fillRect(10,40,178,92);g.strokeStyle='#D3DBD8';g.lineWidth=2;g.strokeRect(10,40,178,92);lab('Coordinator',99,86,'#13212A');
+for(var k=0;k<3;k++){var ex=k===2;g.fillStyle=ex?'#FCEBD0':'#FFFFFF';g.fillRect(330,Y[k]-22,148,44);g.strokeStyle=ex?'#E9A23B':'#D3DBD8';g.strokeRect(330,Y[k]-22,148,44);lab(ex?'3rd shard':'Shard '+(k+1),404,Y[k],'#13212A')}
+function beam(k,a,b,col,dash){var u=sm(a,b,t);if(u<=0)return;var x0=188,y0=86,x1=330,y1=Y[k];g.setLineDash(dash?[8,6]:[]);g.strokeStyle=col;g.lineWidth=3;g.beginPath();g.moveTo(x0,y0);g.lineTo(x0+(x1-x0)*u,y0+(y1-y0)*u);g.stroke();g.setLineDash([]);g.fillStyle=col;g.beginPath();g.arc(x0+(x1-x0)*u,y0+(y1-y0)*u,7,0,6.283);g.fill()}
+beam(0,0.6,1.6,'#1F6E6A');beam(1,0.6,1.6,'#1F6E6A');beam(2,2.2,3.2,'#C9822A',true)}
+function f(ms){draw(ms/1000);if(!calm)requestAnimationFrame(f)}if(calm)draw(4);else requestAnimationFrame(f)})();
+</script></x-embed>
+<x-embed style="position:absolute;left:1284px;top:410px;width:488px;height:172px"><style>html,body{margin:0;height:100%;overflow:hidden;background:transparent}canvas{display:block;width:100%;height:100%}</style><canvas id="c"></canvas><script>
+(function(){var c=document.getElementById('c'),g=c.getContext('2d'),F='system-ui,-apple-system,Segoe UI,Arial,sans-serif';
+function rs(){var d=Math.min(2,window.devicePixelRatio||1),w=c.clientWidth||488,h=c.clientHeight||172;c.width=w*d;c.height=h*d;g.setTransform(d*w/488,0,0,d*h/172,0,0)}addEventListener('resize',rs);rs();
+var calm=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;function cl(v){return v<0?0:v>1?1:v}function sm(a,b,t){var u=cl((t-a)/(b-a));return u*u*(3-2*u)}
+function lab(s,x,y,col){g.fillStyle=col;g.font='500 24px '+F;g.textAlign='center';g.textBaseline='middle';g.fillText(s,x,y)}
+function draw(T){var t=T%6;g.clearRect(0,0,488,172);
+g.fillStyle='#FCEBD0';g.fillRect(10,40,150,110);g.strokeStyle='#E9A23B';g.lineWidth=2;g.strokeRect(10,40,150,110);lab('Shard',85,22,'#13212A');
+g.fillStyle='#FFFFFF';g.fillRect(300,40,178,110);g.strokeStyle='#D3DBD8';g.strokeRect(300,40,178,110);lab('Coordinator',389,22,'#13212A');
+for(var i=0;i<4;i++){var u=sm(0.6+i*0.4,1.6+i*0.4,t);g.fillStyle='#E9A23B';g.beginPath();g.arc(40+i*30,95,7,0,6.283);g.fill();var x=40+i*30+(330+i*34-40-i*30)*u;if(u>0){g.beginPath();g.arc(x,95,7,0,6.283);g.fill()}}
+var q=sm(3.6,4.0,t)*(1-sm(5.5,6,t));if(q>0){g.globalAlpha=q;g.strokeStyle='#1F6E6A';g.lineWidth=3;g.strokeRect(318,78,148,34);g.globalAlpha=1;lab('checked',389,132,'#1F6E6A')}}
+function f(ms){draw(ms/1000);if(!calm)requestAnimationFrame(f)}if(calm)draw(4.5);else requestAnimationFrame(f)})();
+</script></x-embed>
+<p style="position:absolute;left:128px;top:866px;width:1664px;font-size:30px;line-height:1.4;color:#13212A">And if we refresh, which shards should go first? We compare five rules, one of them our own.</p>
+<div style="position:absolute;left:128px;bottom:64px;width:1664px;display:flex;justify-content:space-between"><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">Byte sizes as counted by the simulator</p><p style="font-family:'IBM Plex Mono', 'Courier New', monospace;font-size:24px;color:#5C6B73">03 / 15</p></div>
+<aside>About 45 seconds
+
+So the system has a fixed allowance of network bytes each time step, and every method that has a budget gets exactly the same allowance. That keeps the comparison fair.
+
+There are three ways to spend it, shown in the three small animations. Refresh: a shard sends the coordinator a fresh summary of what it now holds. Extra search: when the coordinator is unsure which shards hold the answer, the question also goes to a third shard. Push: shards send copies of their newest passages, and the coordinator checks those copies for every question.
+
+The second question is about refreshing itself. If we can only refresh a few shards each step, which ones should go first? We compare five rules, and one of them is our own.</aside>
+</section>
