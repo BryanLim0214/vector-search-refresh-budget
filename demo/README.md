@@ -23,6 +23,12 @@ The page opens at http://127.0.0.1:8765/ and is reachable only from the same com
 
 To compare every step with saved runs, add `--results` with the folders that hold them, for example `--results results/main`. When a saved run has the same setting and seed, the page says at each step whether the live recall equals the saved recall exactly. With the author's saved runs, all six methods matched at all 50 steps for eight shards per step, new topics, budget 4, seed 42, and at the first five steps for most similar shard, mixed topics, budget 4, seed 42.
 
+## A saved run
+
+`run_eight_shards_new_topics_B4_seed42.json` is the full record of one run with the starting setting (eight shards per step, new topics, budget 4, seed 42), as the page received it: for every step and method, the shards' sizes and new passages not yet in their summaries, which summaries were sent, missed new matches per shard, recall, bytes spent, and whether the step matched the saved paper run. All six methods matched at all 50 steps. `run_eight_shards_new_topics_B4_seed42.png` is the page at the end of that run.
+
+Averaged over the 50 steps, the share of new matches found was: push 30.3%, most-changed 29.7%, extra search 28.0%, sample-query probe 27.4%, never refresh 25.6%, rotation 24.8%. These are per-step averages for one seed, so they are not the paper's reported numbers, which pool all questions over five seeds.
+
 ## How it relates to `dvs/run.py`
 
 `live_sim.py` drives the same classes in the same order as `run_single_simulation` in `dvs/run.py`. It leaves out two things that only feed a logged rank correlation and change no state: the true number of neighbors each refresh would recover, and the probe's estimate for the other refresh rules. Each method builds its own shards: a copied hnswlib index restarts the random numbers that place new passages in its graph, so copies drift slightly from the paper runs. Shard indexes start small and grow when full, which gives the same index as the full-size ones the paper runs used.
